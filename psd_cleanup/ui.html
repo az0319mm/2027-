@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PSD 자동 클린업</title>
+<style>
+:root{--bg:#fafafa;--fg:#222;--card:#fff;--line:#ddd;--acc:#c2185b;--muted:#666}
+@media (prefers-color-scheme:dark){:root{--bg:#1b1b1d;--fg:#eee;--card:#26262a;--line:#3a3a40;--acc:#f06292;--muted:#aaa}}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif}
+main{max-width:860px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:8px 0 4px}
+.note{color:var(--muted);font-size:13px}
+fieldset{border:1px solid var(--line);border-radius:8px;background:var(--card);margin:12px 0;padding:10px 14px}
+legend{font-weight:600}
+label{display:inline-flex;gap:6px;align-items:center;margin:4px 14px 4px 0}
+textarea,input[type=text],input[type=number],select{width:100%;box-sizing:border-box;padding:6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+.row{margin:6px 0}
+button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:10px 18px;font-size:15px;cursor:pointer}
+button.secondary{background:transparent;color:var(--fg);border:1px solid var(--line)}
+progress{width:100%;height:14px}
+.res{border:1px solid var(--line);border-radius:8px;padding:10px;margin:8px 0;background:var(--card)}
+.ok{color:#2e7d32}.bad{color:#c62828}
+img{max-width:100%;border:1px solid var(--line)}
+.hidden{display:none}
+</style>
+</head>
+<body><main>
+<h1>졸업작품 PSD 자동 클린업</h1>
+<p class="note">모든 처리는 이 컴퓨터 안에서만 실행됩니다. 원본 PSD는 변경하지 않고 <code>_CLEAN.psd</code> 새 파일과 보고서를 만듭니다.
+자동 수정은 '확실'한 오류만 하며, 졸업 검수 통과를 보장하지 않습니다.</p>
+
+<fieldset><legend>1. PSD 파일 또는 폴더</legend>
+<textarea id="inputs" rows="3" placeholder="경로를 한 줄에 하나씩 (예: /Users/me/작품/A002.psd 또는 폴더 경로)"></textarea>
+<div class="row"><input type="text" id="out_dir" placeholder="출력 폴더 (비우면 입력 폴더/_cleanup_output)"></div>
+<label><input type="checkbox" id="overwrite"> 이전 결과 파일 덮어쓰기 (원본은 절대 덮어쓰지 않음)</label>
+</fieldset>
+
+<fieldset><legend>2. 유형</legend>
+<label><input type="radio" name="type" value="apparel" checked> 어패럴</label>
+<label><input type="radio" name="type" value="interior"> 인테리어</label>
+</fieldset>
+
+<fieldset><legend>3. 리핏</legend>
+<label><input type="radio" name="repeat" value="vertical"> 상하</label>
+<label><input type="radio" name="repeat" value="horizontal"> 좌우</label>
+<label><input type="radio" name="repeat" value="both"> 상하좌우</label>
+<label><input type="radio" name="repeat" value="none" checked> 해당 없음</label>
+</fieldset>
+
+<fieldset id="apparel"><legend>4. 어패럴 설정 (선택)</legend>
+<div class="row">도수 <input type="number" id="color_count" min="1" placeholder="예: 6"></div>
+<div class="row">허용 색상 <input type="text" id="colors" placeholder="#FFFFFF, #F4A7B9, #7A5A50"></div>
+<label><input type="checkbox" id="one_color"> 레이어 하나 = 분판 색 하나 구조</label>
+</fieldset>
+
+<fieldset id="interior" class="hidden"><legend>5. 인테리어 설정</legend>
+<div class="row">표현 방식
+<select id="style"><option value="digital">디지털 색면</option><option value="watercolor">수채화</option>
+<option value="pencil">색연필</option><option value="crayon">크레파스</option></select></div>
+<div class="row">스캔 종이색 (선택) <input type="text" id="paper" placeholder="#F8F4EA"></div>
+<div class="row">승인된 질감 레이어 이름 (쉼표, * 사용 가능) <input type="text" id="texture" placeholder="지무늬*, texture"></div>
+</fieldset>
+
+<fieldset><legend>보호</legend>
+<div class="row">수정 금지 레이어 이름 (쉼표, * 사용 가능) <input type="text" id="protect" placeholder="sign*, 로고"></div>
+<label><input type="checkbox" id="nofix"> 검수만 하기 (자동 수정 안 함)</label>
+</fieldset>
+
+<p><button id="run">자동 클린업 실행</button> <button id="cancel" class="secondary" disabled>취소</button></p>
+<progress id="prog" max="1" value="0"></progress>
+<div id="msg" class="note"></div>
+<div id="results"></div>
+</main>
+<script>
+const H = {"Content-Type": "application/json", "X-PSD-Cleanup": "1"};
+const $ = (id) => document.getElementById(id);
+const list = (s) => s.split(",").map(x => x.trim()).filter(Boolean);
+let job = null;
+document.querySelectorAll("input[name=type]").forEach(r => r.addEventListener("change", () => {
+  const t = document.querySelector("input[name=type]:checked").value;
+  $("apparel").classList.toggle("hidden", t !== "apparel");
+  $("interior").classList.toggle("hidden", t !== "interior");
+}));
+function cfg() {
+  const t = document.querySelector("input[name=type]:checked").value;
+  const c = {work_type: t, repeat: document.querySelector("input[name=repeat]:checked").value,
+             protected_layers: list($("protect").value), auto_fix: !$("nofix").checked};
+  if (t === "apparel") {
+    if ($("color_count").value) c.expected_color_count = parseInt($("color_count").value, 10);
+    c.allowed_colors = list($("colors").value);
+    c.one_color_per_layer = $("one_color").checked;
+  } else {
+    c.interior_style = $("style").value;
+    if ($("paper").value.trim()) c.paper_color = $("paper").value.trim();
+    c.approved_texture_layers = list($("texture").value);
+  }
+  return c;
+}
+const fileUrl = (p) => "/files?path=" + encodeURIComponent(p);
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function show(results) {
+  $("results").innerHTML = results.map(r => {
+    const s = r.summary || {}, o = r.outputs || {};
+    const ok = r.status === "ok";
+    return `<div class="res"><b>${esc(r.input)}</b> — <span class="${ok ? "ok" : "bad"}">${esc(r.status)}</span>
+      ${r.error ? `<div class="bad">${esc(r.error)}</div>` : ""}
+      ${ok ? `<div>자동 수정 ${s.applied_fixes}건 · 변경 ${s.changed_pixels_total}px · 저장 후 검증 ${s.verification_passed ? "통과" : "실패"}</div>
+      <div>결과 PSD: <code>${esc(o.clean_psd || "")}</code></div>
+      <div><a href="${fileUrl(o.qa_html)}" target="_blank">QA 보고서 열기</a></div>
+      ${o.diff_png ? `<img src="${fileUrl(o.diff_png)}" alt="diff">` : ""}` : ""}</div>`;
+  }).join("");
+}
+async function poll() {
+  const r = await fetch("/api/jobs/" + job, {headers: H}).then(x => x.json());
+  $("prog").value = r.progress || 0; $("msg").textContent = r.message || "";
+  if (r.status === "running") return setTimeout(poll, 500);
+  $("run").disabled = false; $("cancel").disabled = true;
+  $("msg").textContent = r.status === "done" ? "완료" : r.status + " " + (r.message || "");
+  show(r.results || []);
+}
+$("run").onclick = async () => {
+  const inputs = $("inputs").value.split("\n").map(x => x.trim()).filter(Boolean);
+  if (!inputs.length) { $("msg").textContent = "PSD 경로를 입력하세요"; return; }
+  $("run").disabled = true; $("cancel").disabled = false; $("results").innerHTML = "";
+  const r = await fetch("/api/run", {method: "POST", headers: H, body: JSON.stringify({
+    inputs, config: cfg(), out_dir: $("out_dir").value.trim() || null, overwrite_outputs: $("overwrite").checked})}).then(x => x.json());
+  if (r.error) { $("msg").textContent = r.error; $("run").disabled = false; $("cancel").disabled = true; return; }
+  job = r.job_id; poll();
+};
+$("cancel").onclick = () => job && fetch(`/api/jobs/${job}/cancel`, {method: "POST", headers: H});
+</script>
+</body></html>

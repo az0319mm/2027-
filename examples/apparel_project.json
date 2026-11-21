@@ -1,0 +1,15 @@
+{
+  "work_type": "apparel",
+  "repeat": "both",
+  "expected_color_count": 6,
+  "allowed_colors": ["#FFF9F0", "#F7B6C8", "#E87A9A", "#FCEFB4", "#CDE8F6", "#8A6A5E"],
+  "one_color_per_layer": false,
+  "protected_layers": ["sign*", "로고"],
+  "approved_texture_layers": [],
+  "protected_regions": [
+    {"x": 120, "y": 340, "w": 40, "h": 40, "layers": ["모티브*"], "note": "교수님과 협의한 의도적 1px 하이라이트"}
+  ],
+  "auto_fix": true,
+  "repeat_min": 3,
+  "max_layer_change_ratio": 0.005
+}

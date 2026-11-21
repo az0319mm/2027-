@@ -1,0 +1,9 @@
+{
+  "work_type": "interior",
+  "repeat": "horizontal",
+  "interior_style": "watercolor",
+  "paper_color": "#F8F4EA",
+  "approved_texture_layers": ["지무늬*", "texture*"],
+  "protected_layers": [],
+  "auto_fix": true
+}
