@@ -134,14 +134,15 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         layer_rgba[layer.index] = rgba
         analyzed_layers.append(layer.index)
 
-    if hasattr(engine, "analyze_separation"):
+    if hasattr(engine, "analyze_separation") and cfg.one_color_per_layer:
         lc = {}
         for idx, rgba in layer_rgba.items():
             l = doc.layer_by_index(idx)
             if l.effective_visible and l.has_alpha_channel:
-                px = rgba[rgba[..., 3] == 255][:, :3]
+                px = rgba[rgba[..., 3] == 255][:, :3].astype(np.int64)
                 if len(px):
-                    lc[l.path] = set(map(tuple, np.unique(px, axis=0).tolist())) if len(px) < 4_000_000 else set()
+                    keys = np.unique((px[:, 0] << 16) | (px[:, 1] << 8) | px[:, 2])[:4096]
+                    lc[l.path] = {(int(k) >> 16, (int(k) >> 8) & 255, int(k) & 255) for k in keys}
         findings += engine.analyze_separation(lc)
 
     check_cancel()

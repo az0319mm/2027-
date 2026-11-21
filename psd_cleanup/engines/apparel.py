@@ -66,7 +66,9 @@ class ApparelEngine(BaseEngine):
                                    bounds=self._bounds(layer, c.x, c.y, c.x + 1, c.y + 1),
                                    pdf_ref="2쪽 모티프 회전으로 깨진 경계", fix=fix))
             # 2쪽 대각선 경계 톱니 / 4쪽 경계 위 1픽셀 이물 색
-            for c in A.diagonal_spikes_and_boundary_odd(rgba, self.cfg.repeat_min, layer.has_alpha_channel):
+            # 연속톤 레이어는 어차피 자동 수정하지 않으므로 이 두 탐지기는 평면색 레이어에서만 실행 (속도)
+            for c in (A.diagonal_spikes_and_boundary_odd(rgba, self.cfg.repeat_min, layer.has_alpha_channel)
+                      if flat else []):
                 ev = {"old": list(c.old), "new": list(c.new), "same_color_neighbors": c.same_neighbors,
                       "same_neighborhood_repeats": c.repeat_count,
                       "pattern": "boundary_odd_pixel" if c.kind == "odd_pixel" else "diagonal_spike"}
@@ -83,7 +85,7 @@ class ApparelEngine(BaseEngine):
                                    bounds=self._bounds(layer, c.x, c.y, c.x + 1, c.y + 1), pdf_ref=ref, fix=fix))
             # 2쪽 대각선 경계의 1px 벗어남 (경계선 디지털 직선 검사)
             taken = {(f.bounds[1], f.bounds[0]) for f in out if f.bounds and f.type in self.PIXEL_TYPES}
-            bumps = [t for t in A.line_profile_bumps(rgba, layer.has_alpha_channel)
+            bumps = [t for t in (A.line_profile_bumps(rgba, layer.has_alpha_channel) if flat else [])
                      if (t[0] + layer.bbox[1], t[1] + layer.bbox[0]) not in taken]
             if bumps:
                 K = A.pixel_keys(rgba)

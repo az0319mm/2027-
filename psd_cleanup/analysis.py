@@ -723,9 +723,8 @@ def internal_seams(rgba: np.ndarray, run_len: int = 3, min_runs: int = 3, factor
                 spans[j] = (int(s0[ok].min()), int(e0[ok].max()))
         if nruns.max() < min_runs:
             continue
+        base = max(1.0, float(np.percentile(nruns, 99)))     # 열 전체 상위 1% (한 번만 계산)
         for j in np.nonzero(nruns >= min_runs)[0]:
-            others = np.r_[nruns[:max(0, j - 1)], nruns[j + 2:]]
-            base = max(1.0, float(np.percentile(others, 99))) if len(others) else 1.0
             if nruns[j] < factor * base:
                 continue
             loc = np.r_[nruns[max(0, j - 4):j], nruns[j + 1:j + 5]]
