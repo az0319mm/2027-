@@ -125,3 +125,36 @@ class BaseEngine:
         return [self._f(layer, type="layer_hygiene", confidence=INFO,
                         proposed_action="자동 삭제/변경하지 않음 (보고만)", evidence={"notes": notes},
                         bounds=tuple(layer.bbox))]
+
+    # ---- PDF 대조 후 추가
+    PIXEL_TYPES = ("isolated_speck", "odd_pixel", "pinhole", "edge_spur", "edge_notch")
+
+    def density_guard(self, layer, findings: list[Finding], shape) -> None:
+        """6쪽 오리 사례: 점묘처럼 1픽셀 후보가 한곳에 몰린 영역은 의도 표현일 수 있음 → 자동 수정 보류."""
+        cands = [f for f in findings if f.type in self.PIXEL_TYPES and f.bounds and f.confidence != INFO]
+        if len(cands) < 5:
+            return
+        ox, oy = layer.bbox[0], layer.bbox[1]
+        pts = [(min(max(f.bounds[1] - oy, 0), shape[0] - 1), min(max(f.bounds[0] - ox, 0), shape[1] - 1))
+               for f in cands]
+        for f, d in zip(cands, A.dense_mask(pts, shape)):
+            if d and f.confidence == CERTAIN:
+                f.confidence, f.fix = UNCERTAIN, None
+                f.proposed_action = "보고만 (1픽셀 후보가 한곳에 밀집 → 점묘 등 의도 표현일 수 있음, 6쪽)"
+                f.evidence["dense_cluster"] = True
+
+    def internal_seam_findings(self, layer, rgba) -> list[Finding]:
+        out = []
+        for d, pos, a0, a1, n in A.internal_seams(rgba):
+            h, w = rgba.shape[:2]     # 이음매는 보통 선 전체로 이어지므로 위치 표시는 선 전체(근거에 실제 구간 기록)
+            if d == "vertical":
+                b = self._bounds(layer, pos - 1, 0, pos + 1, h)
+            else:
+                b = self._bounds(layer, 0, pos - 1, w, pos + 1)
+            out.append(self._f(layer, type="internal_seam", confidence=UNCERTAIN,
+                               proposed_action="보고만 (캔버스 안쪽 타일 이음매가 어긋남 의심 — 자동 수정 안 함)",
+                               evidence={"direction": d, "position": pos + (layer.bbox[0] if d == "vertical" else layer.bbox[1]),
+                                         "straight_cut_segments": n, "segment_span": [a0, a1]},
+                               bounds=b, pdf_ref="10쪽 지무늬 리핏 / 8쪽 모티프 리핏"))
+        return out
+

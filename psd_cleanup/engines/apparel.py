@@ -65,6 +65,48 @@ class ApparelEngine(BaseEngine):
                 out.append(self._f(layer, type=c.kind, confidence=conf, proposed_action=act, evidence=ev,
                                    bounds=self._bounds(layer, c.x, c.y, c.x + 1, c.y + 1),
                                    pdf_ref="2쪽 모티프 회전으로 깨진 경계", fix=fix))
+            # 2쪽 대각선 경계 톱니 / 4쪽 경계 위 1픽셀 이물 색
+            for c in A.diagonal_spikes_and_boundary_odd(rgba, self.cfg.repeat_min, layer.has_alpha_channel):
+                ev = {"old": list(c.old), "new": list(c.new), "same_color_neighbors": c.same_neighbors,
+                      "same_neighborhood_repeats": c.repeat_count,
+                      "pattern": "boundary_odd_pixel" if c.kind == "odd_pixel" else "diagonal_spike"}
+                if c.intentional:
+                    conf, act = INTENTIONAL, "보존 (같은 모양이 반복 → 의도적 반복)"
+                elif not flat:
+                    conf, act = UNCERTAIN, "보고만 (연속톤 레이어)"
+                else:
+                    conf, act = CERTAIN, ("투명 처리" if c.new[3] == 0 else f"주변 색 {to_hex(c.new)} 로 채움")
+                fix = PixelFix(np.array([c.y]), np.array([c.x]), np.array([c.new], dtype=np.uint8)) \
+                    if conf == CERTAIN else None
+                ref = "4쪽 경계 위 1픽셀 잘못 칠함" if c.kind == "odd_pixel" else "2쪽 모티프 회전으로 깨진 경계(대각선)"
+                out.append(self._f(layer, type=c.kind, confidence=conf, proposed_action=act, evidence=ev,
+                                   bounds=self._bounds(layer, c.x, c.y, c.x + 1, c.y + 1), pdf_ref=ref, fix=fix))
+            # 2쪽 대각선 경계의 1px 벗어남 (경계선 디지털 직선 검사)
+            taken = {(f.bounds[1], f.bounds[0]) for f in out if f.bounds and f.type in self.PIXEL_TYPES}
+            bumps = [t for t in A.line_profile_bumps(rgba, layer.has_alpha_channel)
+                     if (t[0] + layer.bbox[1], t[1] + layer.bbox[0]) not in taken]
+            if bumps:
+                K = A.pixel_keys(rgba)
+                rep, cnts = A.repeated_mask(K, np.array([t[0] for t in bumps]), np.array([t[1] for t in bumps]),
+                                            3, self.cfg.repeat_min, 0 if layer.has_alpha_channel else A.OOB)
+                for (y, x, new, old, kind), r_, n_ in zip(bumps, rep, cnts):
+                    newc = A.key_to_rgba(new)
+                    ev = {"old": list(A.key_to_rgba(old)), "new": list(newc), "pattern": "line_profile",
+                          "same_neighborhood_repeats": n_}
+                    if r_:
+                        conf, act = INTENTIONAL, "보존 (같은 모양이 반복 → 의도적 반복)"
+                    elif not flat:
+                        conf, act = UNCERTAIN, "보고만 (연속톤 레이어)"
+                    else:
+                        conf, act = CERTAIN, ("투명 처리" if newc[3] == 0 else f"경계 직선에 맞춰 {to_hex(newc)} 로")
+                    fix = PixelFix(np.array([y]), np.array([x]), np.array([newc], dtype=np.uint8)) \
+                        if conf == CERTAIN else None
+                    out.append(self._f(layer, type=kind, confidence=conf, proposed_action=act, evidence=ev,
+                                       bounds=self._bounds(layer, x, y, x + 1, y + 1),
+                                       pdf_ref="2쪽 모티프 회전으로 깨진 경계(대각선)", fix=fix))
+        if self.cfg.repeat != "none":
+            out += self.internal_seam_findings(layer, rgba)
+        self.density_guard(layer, out, rgba.shape[:2])
         # 1쪽 경계 여러 색 / 6쪽 분판
         out += self._palette_checks(layer, rgba)
         out += self._semi_alpha(layer, rgba)
@@ -149,3 +191,27 @@ class ApparelEngine(BaseEngine):
                                evidence={"old": list(c.old), "new": list(c.new)},
                                bounds=(c.x, c.y, c.x + 1, c.y + 1), pdf_ref="3~4쪽"))
         return out
+
+    def analyze_separation(self, layer_colors: dict) -> list[Finding]:
+        """6쪽 '컬러 분판 틀림': 레이어 = 분판 색 구조일 때, 같은 색이 여러 레이어에 흩어져 있는지 / 레이어 수 vs 도수."""
+        if not self.cfg.one_color_per_layer or not layer_colors:
+            return []
+        out = []
+        where: dict = {}
+        for name, cols in layer_colors.items():
+            for c in cols:
+                where.setdefault(c, []).append(name)
+        dup = {to_hex(c): names for c, names in where.items() if len(names) > 1}
+        if dup:
+            out.append(self._f(None, type="separation_mismatch", confidence=UNCERTAIN,
+                               proposed_action="보고만 (같은 색이 여러 분판 레이어에 나뉘어 있음)",
+                               evidence={"colors_in_multiple_layers": dict(list(dup.items())[:30])},
+                               pdf_ref="6쪽 컬러 분판 틀림"))
+        exp = self.cfg.expected_color_count
+        if exp is not None and len(layer_colors) != exp:
+            out.append(self._f(None, type="separation_mismatch", confidence=UNCERTAIN,
+                               proposed_action="보고만 (분판 레이어 수와 입력한 도수가 다름)",
+                               evidence={"visible_pixel_layers": len(layer_colors), "expected_color_count": exp,
+                                         "layers": list(layer_colors)}, pdf_ref="6쪽 컬러 분판 틀림"))
+        return out
+

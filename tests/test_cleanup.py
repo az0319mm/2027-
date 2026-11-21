@@ -391,13 +391,13 @@ def test_grayscale_document_supported(tmp_path):
 def test_change_limit_aborts_layer(tmp_path, defect_psd):
     r = _run(defect_psd, tmp_path, work_type="apparel", max_layer_change_ratio=0.0)
     # 한도 = max(64, 0) → 5px 변경은 허용됨. 대신 많은 변경을 만들어 확인
-    m = blank(H, W)
-    rect(m, 0, H, 0, W, PINK)
-    for y in range(2, H - 2, 3):
-        for x in range(2, W - 2, 3):
-            m[y, x] = (0, 0, 255 - (x % 200), 255)   # 서로 다른 색 1px 다수 (반복 아님)
-    src = build_psd(tmp_path / "many.psd", (W, H), [dict(name="L", rgba=m)])
-    r2 = _run(src, tmp_path, work_type="apparel", max_layer_change_ratio=0.001)
+    S = 300                                          # 밀집하지 않게(14px 간격) 많은 1px 결함
+    m = rect(blank(S, S), 0, S, 0, S, PINK)
+    pts = [(y, x) for y in range(7, S - 7, 14) for x in range(7, S - 7, 14)][:200]
+    for i, (y, x) in enumerate(pts):                 # 결함마다 고유 색 (전체 색 수 <= 256 유지)
+        m[y, x] = (i, 255 - i, 30, 255)
+    src = build_psd(tmp_path / "many.psd", (S, S), [dict(name="L", rgba=m)])
+    r2 = _run(src, tmp_path, work_type="apparel", max_layer_change_ratio=0.0001)
     assert r2.summary["changed_pixels_total"] == 0
     assert any("안전 한도" in f["skip_reason"] for f in r2.qa["findings"])
 
@@ -509,3 +509,156 @@ def test_interior_keeps_similar_dots_more_conservatively(tmp_path):
     ra = _run(src, tmp_path / "a", work_type="apparel")
     assert ri.summary["changed_pixels_total"] == 0
     assert ra.summary["changed_pixels_total"] == 4
+
+
+# ============================== 기준 PDF 사진(2·4·6·8·10쪽) 대조 후 추가한 사례 재현 테스트
+ORANGE, MAGENTA, NAVY, LBLUE = (205, 135, 90), (210, 70, 200), (40, 50, 70), (150, 185, 200)
+
+
+def _diagonal_two_color(h=90, w=120, slope=0.6, c=20.0):
+    """깨끗한 대각선 경계(디지털 직선): y > slope*x + c 는 MAGENTA, 나머지 ORANGE."""
+    yy, xx = np.mgrid[:h, :w]
+    m = blank(h, w)
+    m[...] = (*ORANGE, 255)
+    m[yy > slope * xx + c] = (*MAGENTA, 255)
+    return m
+
+
+def test_p2_clean_diagonal_edges_untouched_and_rotation_spikes_fixed(tmp_path):
+    clean = _diagonal_two_color()
+    dirty = clean.copy()
+    spikes = []
+    for x in (17, 44, 78, 101):                # 대각선 경계에 1px 톱니 (불규칙 위치 = 회전으로 깨진 경계)
+        y = int(np.floor(0.6 * x + 20))        # 경계 바로 위 ORANGE 쪽에 MAGENTA 1px 가 튀어나옴
+        while dirty[y, x, 0] != ORANGE[0]:
+            y -= 1
+        dirty[y, x] = (*MAGENTA, 255)
+        spikes.append((y, x))
+    a = build_psd(tmp_path / "clean.psd", (120, 90), [dict(name="L", rgba=clean)])
+    b = build_psd(tmp_path / "dirty.psd", (120, 90), [dict(name="L", rgba=dirty)])
+    ra = run_file(a, ProjectConfig(work_type="apparel"), tmp_path / "oa")
+    assert ra.summary["changed_pixels_total"] == 0
+    rb = run_file(b, ProjectConfig(work_type="apparel"), tmp_path / "ob")
+    out = _layer_canvas(PSDDocument(rb.outputs["clean_psd"]), "L")
+    changed = _changed(_layer_canvas(PSDDocument(b), "L"), out)
+    assert changed and changed <= set(spikes) | {(y, x) for y, x in np.argwhere(np.any(dirty != clean, axis=2))}
+    # 결과가 원래의 깨끗한 경계와 같아짐 (수정된 픽셀 기준)
+    for y, x in changed:
+        assert tuple(out[y, x]) == tuple(clean[y, x])
+
+
+def test_p4_boundary_odd_pixel_on_staircase_fixed_without_new_color(tmp_path):
+    m = _diagonal_two_color()
+    # 계단 경계 위 1px 회색 (주황·분홍 어느 쪽 색도 아님)
+    y, x = 0, 33
+    while not (m[y, x, 0] == ORANGE[0] and m[y + 1, x, 0] == MAGENTA[0]):
+        y += 1
+    m[y, x] = (200, 200, 190, 255)
+    src = build_psd(tmp_path / "p4.psd", (120, 90), [dict(name="L", rgba=m)])
+    r = _run(src, tmp_path, work_type="apparel")
+    out = _layer_canvas(PSDDocument(r.outputs["clean_psd"]), "L")
+    assert tuple(out[y, x, :3]) in (ORANGE, MAGENTA)
+    assert r.summary["changed_pixels_total"] == 1
+    assert {tuple(c) for c in out[..., :3].reshape(-1, 3).tolist()} == {ORANGE, MAGENTA}
+
+
+def test_p6_dense_stipple_preserved_isolated_error_fixed(tmp_path):
+    """6쪽 오리: 몸통 안 점묘(의도)는 보존, 나머지 1픽셀 오류는 정리."""
+    rng = np.random.default_rng(3)
+    m = rect(blank(H, W), 5, 85, 5, 115, (235, 235, 235))
+    stip = set()
+    while len(stip) < 25:                       # 한 영역(20x20)에 몰린 점묘
+        y, x = int(rng.integers(30, 50)), int(rng.integers(60, 80))
+        if all(abs(y - a) > 1 or abs(x - b) > 1 for a, b in stip):
+            stip.add((y, x))
+    for y, x in stip:
+        m[y, x] = (30, 30, 230, 255)
+    m[70, 20] = (30, 30, 230, 255)              # 홀로 떨어진 1px 오류
+    src = build_psd(tmp_path / "duck.psd", (W, H), [dict(name="duck", rgba=m)])
+    r = _run(src, tmp_path, work_type="apparel")
+    out = _layer_canvas(PSDDocument(r.outputs["clean_psd"]), "duck")
+    assert all(tuple(out[y, x, :3]) == (30, 30, 230) for y, x in stip)
+    assert tuple(out[70, 20, :3]) == (235, 235, 235)
+    assert any(f["evidence"].get("dense_cluster") for f in r.qa["findings"])
+
+
+def test_p6_color_separation_mismatch_reported(tmp_path):
+    olive, navy = (110, 120, 60), (30, 40, 80)
+    l1 = rect(blank(H, W), 10, 30, 10, 30, olive)
+    rect(l1, 40, 50, 10, 20, navy)              # Olive 분판에 남색이 섞임
+    l2 = rect(blank(H, W), 10, 30, 60, 90, navy)
+    src = build_psd(tmp_path / "sep.psd", (W, H), [dict(name="Olive", rgba=l1), dict(name="Navy", rgba=l2)])
+    r = _run(src, tmp_path, work_type="apparel", one_color_per_layer=True, expected_color_count=3)
+    sm = [f for f in r.qa["findings"] if f["type"] == "separation_mismatch"]
+    assert len(sm) == 2
+    assert "#1E2850" in sm[0]["evidence"]["colors_in_multiple_layers"]
+    assert any(f["type"] == "layer_multi_color" and f["layer_name"] == "Olive" for f in r.qa["findings"])
+
+
+def _soft_disk(h, w, cy, cx, r, color, feather=4):
+    yy, xx = np.mgrid[:h, :w]
+    d = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    a = np.clip((r - d) / feather, 0, 1)
+    m = blank(h, w)
+    m[..., :3] = color
+    m[..., 3] = (a * 255).astype(np.uint8)
+    return m
+
+
+def test_p8_outline_problems_reported_not_fixed(tmp_path):
+    m = _soft_disk(H, W, 45, 60, 30, (150, 190, 210))
+    m[20:70, 60:91][m[20:70, 60:91, 3] > 0] = (150, 190, 210, 255)   # 오른쪽 반은 딱딱한(계단) 외곽
+    yy, xx = np.nonzero((m[..., 3] == 255))
+    edge = [(y, x) for y, x in zip(yy, xx) if x < 45 and (m[y, x - 2, 3] < 255)][:3]
+    for y, x in edge:                                                    # 외곽의 검은 도장툴 점
+        m[y, x] = (20, 20, 20, 255)
+    m[5:60, 10] = (90, 90, 90, 255)                                      # 세로 1px 직선 자국
+    m[5:60, 9] = 0
+    m[5:60, 11] = 0
+    src = build_psd(tmp_path / "p8.psd", (W, H), [dict(name="leaf", rgba=m)])
+    r = _run(src, tmp_path, work_type="interior", interior_style="watercolor")
+    types = {f["type"] for f in r.qa["findings"]}
+    assert {"hard_edge", "edge_foreign_speck", "line_artifact"} <= types
+    assert r.summary["changed_pixels_total"] == 0
+
+
+def _spots_tile(n=48, seed=0):
+    rng = np.random.default_rng(seed)
+    t = rect(blank(n, n), 0, n, 0, n, (220, 235, 210))
+    for _ in range(40):
+        cy, cx, r = rng.integers(0, n), rng.integers(0, n), rng.integers(1, 3)
+        for oy in (-n, 0, n):                     # 타일 자체는 이음매 없게(래핑)
+            for ox in (-n, 0, n):
+                yy, xx = np.mgrid[:n, :n]
+                t[(yy - cy - oy) ** 2 + (xx - cx - ox) ** 2 <= r * r] = (160, 180, 150, 255)
+    return t
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_p10_ground_texture_internal_seam(tmp_path, broken):
+    t = _spots_tile()
+    big = np.tile(t, (3, 3, 1))
+    if broken:                                   # 오른쪽 아래 타일들을 다른 위치에서 잘라 붙임 → 내부 이음매 어긋남
+        big[48:, 96:] = np.roll(np.roll(big[48:, 96:], 17, axis=0), 11, axis=1)
+    src = build_psd(tmp_path / "ground.psd", (144, 144), [dict(name="지무늬", rgba=big, trim=False)])
+    r = _run(src, tmp_path, work_type="interior")
+    seams = [f for f in r.qa["findings"] if f["type"] == "internal_seam"]
+    if broken:
+        assert any(f["evidence"]["direction"] == "vertical" and abs(f["evidence"]["position"] - 96) <= 1 for f in seams)
+        # 이음매에서 잘린 무늬 조각은 지우지 않음(리핏을 먼저 맞춰야 함). 검출 못 한 가로 이음매(y=48) 위 조각만 예외
+        for f in r.qa["findings"]:
+            if f["applied"]:
+                assert abs(f["bounds"][1] - 48) <= 1, f
+    else:
+        assert not seams
+        assert r.summary["changed_pixels_total"] == 0
+
+
+def test_stripes_not_reported_as_internal_seam(tmp_path):
+    m = blank(90, 120)
+    for x in range(0, 120, 10):
+        m[:, x:x + 5] = (*PINK, 255)
+        m[:, x + 5:x + 10] = (*CREAM, 255)
+    src = build_psd(tmp_path / "st.psd", (120, 90), [dict(name="stripe", rgba=m, trim=False)])
+    r = _run(src, tmp_path, work_type="interior")
+    assert not [f for f in r.qa["findings"] if f["type"] in ("internal_seam", "line_artifact")]

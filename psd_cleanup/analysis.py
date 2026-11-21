@@ -512,3 +512,332 @@ def seam_discontinuities(lines: np.ndarray, min_len: int = 2, abs_thr: float = 6
         else:
             i += 1
     return segs, {"flagged_lines": int(flag.sum()), "total_lines": int(N)}
+
+
+# ================================================================ PDF 대조 후 추가 탐지기
+def dense_mask(points: list[tuple[int, int]], shape: tuple[int, int], radius: int = 12,
+               min_count: int = 5) -> list[bool]:
+    """후보가 반경 안에 min_count 개 이상 모여 있으면 True (6쪽 오리: 점묘 같은 의도 표현 영역 보호)."""
+    if not points:
+        return []
+    cnt = np.zeros(shape, np.float32)
+    for y, x in points:
+        cnt[y, x] += 1
+    s = ndimage.uniform_filter(cnt, size=2 * radius + 1, mode="constant") * (2 * radius + 1) ** 2
+    return [bool(s[y, x] >= min_count - 0.5) for y, x in points]
+
+
+@dataclass
+class SpikeCandidate:
+    y: int
+    x: int
+    kind: str                 # edge_spur / edge_notch / odd_pixel(boundary)
+    old: tuple[int, int, int, int]
+    new: tuple[int, int, int, int]
+    same_neighbors: int
+    repeat_count: int
+    intentional: bool
+
+
+def diagonal_spikes_and_boundary_odd(rgba: np.ndarray, repeat_min: int, has_alpha: bool,
+                                     patch_r: int = 3) -> list[SpikeCandidate]:
+    """2쪽 '모티프 회전으로 깨진 경계'(대각선 경계의 톱니)와 4쪽 '경계 위 1픽셀 이물 색'.
+
+    A) 톱니(spike/notch): 픽셀 P 의 같은 색 이웃이 1~2개(서로 붙어 있음)뿐이고 나머지 이웃이 모두 한 색 O.
+       붙어 있는 같은 색 이웃은 두꺼운 몸체여야 함(그 이웃의 같은 색 이웃 >= 5) → 선 끝·뾰족한 모서리는 제외.
+       수정: P := O.
+    B) 경계 위 이물 픽셀: P 의 색이 8이웃 어디에도 없고, 이웃 중 한 색 M 이 5개 이상 → P := M.
+       (8이웃이 모두 같은 경우는 single_pixel_anomalies 가 담당)"""
+    K = pixel_keys(rgba)
+    H, W = K.shape
+    if H < 3 or W < 3:
+        return []
+    oob = 0 if has_alpha else OOB
+    P = padded(K, 2, oob)
+    nb = np.stack([shifted(P, 2, dy, dx, H, W) for dy, dx in NB8], axis=-1)   # HxWx8
+    same = (nb == K[..., None])
+    nsame = same.sum(axis=2)
+    out_idx = []
+    # 후보 1차 필터 (벡터) → 세부 판정은 파이썬 루프 (후보 수가 적음)
+    cand = (nsame <= 2) & (K != OOB)
+    ys, xs = np.nonzero(cand)
+    order = [(-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1)]  # 원형 순서
+    ring_idx = [NB8.index(o) for o in order]
+    for y, x in zip(ys, xs):
+        k = int(K[y, x])
+        n = nb[y, x]
+        s = same[y, x]
+        ns = int(nsame[y, x])
+        others = [int(v) for v, sm in zip(n, s) if not sm]
+        if any(v == OOB for v in others):
+            continue
+        if ns == 0:
+            if len(set(others)) == 1:
+                continue                      # 8이웃 동일 → 기존 탐지기
+            vals, cnts = np.unique(np.array(others), return_counts=True)
+            m = int(vals[cnts.argmax()])
+            if cnts.max() < 5 or (m & 255) != 255:
+                continue
+            out_idx.append((y, x, "odd_pixel", m, 0))
+            continue
+        if len(set(others)) != 1:
+            continue
+        o = others[0]
+        if ns == 2:                            # 두 같은 색 이웃은 원형으로 인접해야 함
+            pos = [i for i, ri in enumerate(ring_idx) if s[ri]]
+            if (pos[1] - pos[0]) % 8 not in (1, 7):
+                continue
+        thick = False
+        for (dy, dx), sm in zip(NB8, s):
+            if sm:
+                yy, xx = y + dy, x + dx
+                if 0 <= yy < H and 0 <= xx < W and int(nsame[yy, xx]) >= 5:
+                    thick = True
+        if not thick:
+            continue
+        kind = "edge_notch" if k == 0 or (has_alpha and (k & 255) == 0) else "edge_spur"
+        out_idx.append((y, x, kind, o, ns))
+    if not out_idx:
+        return []
+    cy = np.array([t[0] for t in out_idx])
+    cx = np.array([t[1] for t in out_idx])
+    rep, counts = repeated_mask(K, cy, cx, patch_r, repeat_min, oob)
+    return [SpikeCandidate(int(y), int(x), kind, key_to_rgba(int(K[y, x])), key_to_rgba(o), ns, counts[i], bool(rep[i]))
+            for i, (y, x, kind, o, ns) in enumerate(out_idx)]
+
+
+def edge_foreign_specks(rgba: np.ndarray, band: int = 2, delta: float = 60, max_area: int = 16):
+    """8쪽 '도장툴/스팟툴 사용 후 정리 안 한 부분': 외곽 띠 안의 작은 이질 점(주변 몸체보다 확연히 어둡거나 밝음)."""
+    a = rgba[..., 3]
+    mask = a >= 128
+    if mask.sum() < 50 or mask.all():
+        return []
+    dist = ndimage.distance_transform_cdt(mask, metric="chessboard")
+    rgb = rgba[..., :3].astype(np.float32)
+    lum = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+    w = mask.astype(np.float32)
+    s = ndimage.uniform_filter(lum * w, size=15)
+    c = ndimage.uniform_filter(w, size=15)
+    local = s / np.maximum(c, 1e-6)
+    odd = mask & (dist <= band) & (np.abs(lum - local) >= delta)
+    lab, n = ndimage.label(odd, structure=EIGHT)
+    out = []
+    for i, sl in enumerate(ndimage.find_objects(lab)):
+        sub = lab[sl] == i + 1
+        if sub.sum() > max_area:
+            continue
+        yy, xx = np.nonzero(sub)
+        out.append((yy + sl[0].start, xx + sl[1].start))
+    return out
+
+
+def hard_edge_segments(rgba: np.ndarray, soft_ratio: float = 0.4, min_px: int = 30):
+    """8쪽 '외곽 매끄럽게 정리 안 된 부분': 대부분 부드러운(반투명) 외곽인 레이어에서
+    계단처럼 딱딱한(alpha 0→255) 외곽이 몰려 있는 구간."""
+    a = rgba[..., 3]
+    m = a > 0
+    if not m.any() or m.all():
+        return []
+    Pm = padded(~m, 1, True)
+    H, W = a.shape
+    touch = np.zeros_like(m)
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        touch |= shifted(Pm, 1, dy, dx, H, W)
+    boundary = m & touch
+    nb = int(boundary.sum())
+    if nb < min_px:
+        return []
+    soft = boundary & (a < 255)
+    if soft.sum() / nb < soft_ratio:
+        return []                    # 원래 하드 엣지 레이어
+    hard = boundary & (a == 255)
+    lab, n = ndimage.label(ndimage.binary_dilation(hard, iterations=2), structure=EIGHT)
+    out = []
+    for i, sl in enumerate(ndimage.find_objects(lab)):
+        sub = (lab[sl] == i + 1) & hard[sl]
+        if sub.sum() >= min_px:
+            yy, xx = np.nonzero(sub)
+            out.append((yy + sl[0].start, xx + sl[1].start))
+    return out
+
+
+def straight_line_artifacts(rgba: np.ndarray, min_len: int = 24):
+    """8쪽 사례의 세로/가로 1px 직선 자국 (양옆과 다른 1px 폭 직선이 길게 이어짐)."""
+    rgba = np.pad(rgba, ((1, 1), (1, 1), (0, 0)))   # 레이어 경계에 붙은 선도 잡도록 투명 1px 여백
+    f = _premul(rgba)
+    out = []
+    for axis in ("v", "h"):
+        g = f if axis == "v" else f.transpose(1, 0, 2)
+        if g.shape[1] < 3:
+            continue
+        c, l, r = g[:, 1:-1], g[:, :-2], g[:, 2:]
+        dl = np.abs(c - l).sum(axis=2)
+        dr = np.abs(c - r).sum(axis=2)
+        dlr = np.abs(l - r).sum(axis=2)
+        line = (dl > 30) & (dr > 30) & (dlr < 0.35 * np.minimum(dl, dr))
+        for j in range(line.shape[1]):
+            col = line[:, j]
+            if col.sum() < min_len:
+                continue
+            # 가장 긴 연속 구간
+            d = np.diff(np.concatenate([[0], col.astype(int), [0]]))
+            st, en = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+            for s0, e0 in zip(st, en):
+                if e0 - s0 >= min_len:
+                    if axis == "v":
+                        out.append(("vertical", j, int(s0) - 1, int(e0) - 1))
+                    else:
+                        out.append(("horizontal", j, int(s0) - 1, int(e0) - 1))
+    return out
+
+
+def internal_seams(rgba: np.ndarray, run_len: int = 3, min_runs: int = 3, factor: float = 2.5, thr: float = 30):
+    """10쪽 '지무늬 리핏 안 맞는 경우': 캔버스 안쪽에서 타일을 이어 붙인 경계가 어긋난 세로/가로 직선.
+    잘린 이음매에서는 무늬(점 등)가 한 직선에서 일제히 잘려 '곧은 세로(가로) 경계 구간(>= run_len 줄)'이 많이 생긴다.
+    열마다 그런 구간 수를 세고, 다른 열들(상위 1%)보다 factor 배 이상 튀는 열을 보고.
+    디자인된 직선 경계(스트라이프·체크: 같은 색 쌍이 대부분)는 제외."""
+    f = _premul(rgba)
+    K = pixel_keys(rgba)
+    out = []
+    for axis in ("v", "h"):
+        g = f if axis == "v" else f.transpose(1, 0, 2)
+        kk = K if axis == "v" else K.T
+        N, M = g.shape[:2]
+        if M < 16 or N < 16:
+            continue
+        strong = np.abs(np.diff(g, axis=1)).sum(axis=2) > thr      # strong[:, j] : 이음매 j|j+1
+        # 세로 방향 연속 구간: 시작/끝 찾기
+        st = strong.astype(np.int8)
+        d = np.diff(np.vstack([np.zeros((1, st.shape[1]), np.int8), st, np.zeros((1, st.shape[1]), np.int8)]), axis=0)
+        nruns = np.zeros(st.shape[1], int)
+        medlen = np.zeros(st.shape[1])
+        spans: dict = {}
+        for j in range(st.shape[1]):
+            s0 = np.nonzero(d[:, j] == 1)[0]
+            e0 = np.nonzero(d[:, j] == -1)[0]
+            L = e0 - s0
+            ok = L >= run_len
+            nruns[j] = int(ok.sum())
+            if ok.any():
+                medlen[j] = float(np.median(L[ok]))
+                spans[j] = (int(s0[ok].min()), int(e0[ok].max()))
+        if nruns.max() < min_runs:
+            continue
+        for j in np.nonzero(nruns >= min_runs)[0]:
+            others = np.r_[nruns[:max(0, j - 1)], nruns[j + 2:]]
+            base = max(1.0, float(np.percentile(others, 99))) if len(others) else 1.0
+            if nruns[j] < factor * base:
+                continue
+            loc = np.r_[nruns[max(0, j - 4):j], nruns[j + 1:j + 5]]
+            if len(loc) and loc.max() * 2 > nruns[j]:
+                continue      # 바로 옆 줄도 높음 = 점선·테두리 같은 얇은 디자인 요소(위/아래 가장자리 쌍)
+            if medlen[j] >= 16:
+                continue      # 긴 직선 경계(스트라이프·체크) = 디자인. 잘린 이음매는 짧은 구간이 여러 개
+            r0, r1 = spans[j]
+            out.append(("vertical" if axis == "v" else "horizontal", int(j + 1), r0, r1, int(nruns[j])))
+    return out
+
+
+def _chains(K: np.ndarray, max_jump: int = 2):
+    """열마다 세로 방향 색 전환(y|y+1, 위색 a, 아래색 b)을 찾아 같은 (a,b) 전환을 옆 열과 이어 경계선 체인을 만든다.
+    반환: [(a, b, [(x, y), ...])]  (y = 전환 위쪽 픽셀의 행)"""
+    H, W = K.shape
+    tr = K[:-1] != K[1:]
+    open_chains: dict = {}          # (a,b) -> list of chains (각 chain: [ (x,y), ... ])
+    done = []
+    prev_ends: list = []
+    for x in range(W):
+        ys = np.nonzero(tr[:, x])[0]
+        cur = []
+        used = set()
+        for y in ys:
+            a, b = int(K[y, x]), int(K[y + 1, x])
+            best = None
+            for ci, (pa, pb, ch) in enumerate(prev_ends):
+                if ci in used or pa != a or pb != b:
+                    continue
+                if abs(ch[-1][1] - y) <= max_jump and ch[-1][0] == x - 1:
+                    if best is None or abs(ch[-1][1] - y) < abs(prev_ends[best][2][-1][1] - y):
+                        best = ci
+            if best is not None:
+                used.add(best)
+                ch = prev_ends[best][2]
+                ch.append((x, int(y)))
+                cur.append((a, b, ch))
+            else:
+                cur.append((a, b, [(x, int(y))]))
+        for ci, item in enumerate(prev_ends):
+            if ci not in used:
+                done.append(item)
+        prev_ends = cur
+    done += prev_ends
+    return [c for c in done if len(c[2]) >= 9]
+
+
+def _spread(xs: np.ndarray, hs: np.ndarray) -> float:
+    """점들이 '디지털 직선'인지: 어떤 기울기 s 에 대해 (h - s*x) 의 최대-최소 < 1 이면 디지털 직선."""
+    if len(xs) < 2:
+        return 0.0
+    s0 = np.polyfit(xs, hs, 1)[0]
+    best = 9e9
+    for s in s0 + np.linspace(-0.12, 0.12, 25):
+        r = hs - s * xs
+        best = min(best, float(r.max() - r.min()))
+    return best
+
+
+def line_profile_bumps(rgba: np.ndarray, has_alpha: bool, w: int = 7):
+    """2쪽 '모티프 회전으로 깨진 경계': 경계선(가로형·세로형)을 따라가며
+    양옆 w칸이 깨끗한 디지털 직선인데 가운데 한 칸만 1px 벗어나, 그 칸을 ±1 고치면 전체가 디지털 직선이 되는 곳.
+    (곡선·원 꼭짓점은 ±w 범위가 직선이 아니므로 제외)
+    반환: [(y, x, new_key, old_key, kind)] — 수정은 1픽셀, 이웃의 기존 색으로."""
+    K0 = pixel_keys(rgba)
+    out = []
+    for transpose in (False, True):
+        K = K0.T if transpose else K0
+        H, W = K.shape
+        for a, b, ch in _chains(K):
+            if len(ch) < 2 * w + 1:
+                continue
+            xs = np.array([p[0] for p in ch], float)
+            hs = np.array([p[1] for p in ch], float)
+            n = len(ch)
+            for i in range(w, n - w):
+                if xs[i + w] - xs[i - w] != 2 * w:
+                    continue
+                sl = slice(i - w, i + w + 1)
+                wx, wh = xs[sl], hs[sl].copy()
+                if _spread(wx, wh) < 0.999:
+                    continue                       # 이미 깨끗한 직선
+                side = np.r_[0:w, w + 1:2 * w + 1]
+                if _spread(wx[side], wh[side]) >= 0.999:
+                    continue                       # 양옆이 직선이 아님 (곡선/복잡한 형태)
+                if abs(np.polyfit(wx[side], wh[side], 1)[0]) > 1.0:
+                    continue
+                ok = []
+                for dd in (-1, 1):
+                    t = wh.copy()
+                    t[w] += dd
+                    if _spread(wx, t) < 0.999:
+                        ok.append(dd)
+                if len(ok) != 1:
+                    continue
+                x, y = int(xs[i]), int(hs[i])
+                if ok[0] == 1:   # 전환이 1칸 위에 있음 → 아래색 b 가 위로 튀어나옴: (y+1) 픽셀을 a 로
+                    py, new, old = y + 1, a, b
+                else:            # 전환이 1칸 아래 → 위색 a 가 아래로 파고듦: y 픽셀을 b 로
+                    py, new, old = y, b, a
+                if not (0 <= py < H) or int(K[py, x]) != old:
+                    continue
+                win = K[max(0, py - 1):py + 2, max(0, x - 1):x + 2]
+                if not set(np.unique(win).tolist()) <= {a, b}:
+                    continue
+                kind = "edge_notch" if old == 0 else "edge_spur"
+                yy, xx = (x, py) if transpose else (py, x)
+                out.append((yy, xx, new, old, kind))
+    seen, uniq = set(), []
+    for t in out:
+        if (t[0], t[1]) not in seen:
+            seen.add((t[0], t[1]))
+            uniq.append(t)
+    return uniq

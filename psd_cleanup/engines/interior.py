@@ -48,6 +48,8 @@ class InteriorEngine(BaseEngine):
                            pdf_ref="1쪽 지무늬·배경 포함 점 / 9쪽 덜 지워진 영역")
         out += self._faint_residue(layer, rgba)              # 1쪽 지우개 흔적 / 7·9쪽
         out += self._paper(layer, rgba)                      # 1쪽 스캔 배경 외곽 잔여
+        out += self._outline_checks(layer, rgba)            # 8쪽 외곽·도장툴·직선 자국
+        out += self.internal_seam_findings(layer, rgba)      # 10쪽 지무늬 리핏(내부 이음매)
         if not approved_texture:                             # 11쪽 승인 질감은 내부 검사 제외
             if p["pixel_fix"]:
                 # 인테리어: 눈에 띄는 1픽셀(채널 차 >= 16)만 대상. 미세 노이즈는 질감으로 보고 무시
@@ -60,6 +62,30 @@ class InteriorEngine(BaseEngine):
                                        evidence={"area": int(len(ys))},
                                        bounds=self._bounds(layer, xs.min(), ys.min(), xs.max() + 1, ys.max() + 1),
                                        pdf_ref="1쪽 밝은 컬러가 여백처럼 표현"))
+        self.density_guard(layer, out, rgba.shape[:2])
+        return out
+
+    def _outline_checks(self, layer, rgba) -> list[Finding]:
+        out = []
+        if layer.has_alpha_channel:
+            for ys, xs in A.edge_foreign_specks(rgba)[:200]:
+                out.append(self._f(layer, type="edge_foreign_speck", confidence=UNCERTAIN,
+                                   proposed_action="보고만 (외곽의 이질적인 작은 점 — 도장툴/스팟툴 흔적 의심)",
+                                   evidence={"pixels": int(len(ys))},
+                                   bounds=self._bounds(layer, xs.min(), ys.min(), xs.max() + 1, ys.max() + 1),
+                                   pdf_ref="8쪽 도장툴·스팟툴 사용 후 정리 안 한 부분"))
+            for ys, xs in A.hard_edge_segments(rgba)[:100]:
+                out.append(self._f(layer, type="hard_edge", confidence=UNCERTAIN,
+                                   proposed_action="보고만 (부드러운 외곽 중 계단처럼 딱딱한 구간 — 매끄럽게 정리 필요 여부 확인)",
+                                   evidence={"hard_boundary_pixels": int(len(ys))},
+                                   bounds=self._bounds(layer, xs.min(), ys.min(), xs.max() + 1, ys.max() + 1),
+                                   pdf_ref="8쪽 외곽 매끄럽게 정리 안 된 부분"))
+        for d, pos, a0, a1 in A.straight_line_artifacts(rgba)[:50]:
+            b = self._bounds(layer, pos, a0, pos + 1, a1) if d == "vertical" else self._bounds(layer, a0, pos, a1, pos + 1)
+            out.append(self._f(layer, type="line_artifact", confidence=UNCERTAIN,
+                               proposed_action="보고만 (1px 직선 자국 — 가이드/잘림선 잔여 의심)",
+                               evidence={"direction": d, "length_px": a1 - a0}, bounds=b,
+                               pdf_ref="8쪽 정리 안 된 부분"))
         return out
 
     def _faint_residue(self, layer, rgba) -> list[Finding]:

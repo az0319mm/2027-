@@ -17,7 +17,7 @@ from . import __version__
 from . import repeat as R
 from .config import ProjectConfig, parse_hex
 from .engines import get_engine
-from .findings import CERTAIN, INFO, INTENTIONAL, UNSUPPORTED, Finding
+from .findings import CERTAIN, INFO, INTENTIONAL, UNCERTAIN, UNSUPPORTED, Finding
 from .psd_io import PSDDocument, sha256_file, write_patched_psd
 
 ProgressFn = Callable[[float, str], None]
@@ -111,6 +111,14 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         approved = _match_any(cfg.approved_texture_layers, layer.name, layer.path)
         lf = engine.analyze_layer(layer, rgba, approved_texture=approved)
         lf += R.seam_findings(rgba, layer.bbox[0], layer.bbox[1], W, H, cfg.repeat, engine.name, layer)
+        seams = [f.bounds for f in lf if f.type in ("internal_seam", "repeat_discontinuity") and f.bounds]
+        if seams:   # 리핏 이음매 위 픽셀은 리핏을 먼저 바로잡아야 함 → 그 근처 자동 수정 보류
+            for f in lf:
+                if f.confidence == CERTAIN and f.bounds and any(
+                        f.bounds[0] < b[2] + 2 and b[0] - 2 < f.bounds[2] and
+                        f.bounds[1] < b[3] + 2 and b[1] - 2 < f.bounds[3] for b in seams):
+                    f.confidence, f.fix = UNCERTAIN, None
+                    f.proposed_action = "보고만 (리핏 이음매 위 — 리핏을 먼저 맞춘 뒤 다시 검사)"
         protected = _match_any(cfg.protected_layers, layer.name, layer.path)
         for f in lf:
             if f.confidence != CERTAIN:
@@ -125,6 +133,16 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         findings += lf
         layer_rgba[layer.index] = rgba
         analyzed_layers.append(layer.index)
+
+    if hasattr(engine, "analyze_separation"):
+        lc = {}
+        for idx, rgba in layer_rgba.items():
+            l = doc.layer_by_index(idx)
+            if l.effective_visible and l.has_alpha_channel:
+                px = rgba[rgba[..., 3] == 255][:, :3]
+                if len(px):
+                    lc[l.path] = set(map(tuple, np.unique(px, axis=0).tolist())) if len(px) < 4_000_000 else set()
+        findings += engine.analyze_separation(lc)
 
     check_cancel()
     prog(0.68, "합성 결과 검사")
