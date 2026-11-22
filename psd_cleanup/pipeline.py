@@ -189,6 +189,38 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         findings.append(Finding(type="separation_info", engine=engine.name, scope="document", confidence=INFO,
                                 proposed_action="분판 모드 아님 → 레이어별 검사", evidence={"reason": sep_reason}))
 
+    if cfg.remove_paper and engine.name == "interior":
+        from .findings import PixelFix
+        from .paper import remove_paper
+        paper = tuple(parse_hex(cfg.paper_color)) if cfg.paper_color else None
+        for idx, rgba in list(layer_rgba.items()):
+            l = doc.layer_by_index(idx)
+            if not l.editable or not l.has_alpha_channel or not l.effective_visible \
+                    or _match_any(cfg.protected_layers, l.name, l.path):
+                continue
+            pr = remove_paper(rgba, paper)
+            if pr is None:
+                continue           # 종이색 픽셀이 거의 없는 레이어(예: 단색 배경)
+            ch = np.any(pr.rgba != rgba, axis=2)
+            if not ch.any():
+                continue
+            ys, xs = np.nonzero(ch)
+            f = engine._f(l, type="paper_removed", confidence=CERTAIN,
+                          proposed_action="바깥 종이 → 투명, 모티브 외곽은 물감 농도로 부드럽게 + 종이색 테두리 제거",
+                          evidence={"paper_color": to_hex(pr.paper_rgb), "removed_px": pr.removed_px,
+                                    "softened_edge_px": pr.softened_px, "dust_removed": pr.dust_components,
+                                    "thin_lines_removed": pr.thin_line_components,
+                                    "enclosed_paper_kept(x0,y0,x1,y1,area)": pr.enclosed_paper_regions[:30]},
+                          bounds=tuple(l.bbox), pdf_ref="기준: 스캔한 모티브의 배경이 외곽에 남아 있을 때 / 8쪽 / 12쪽",
+                          fix=PixelFix(ys, xs, pr.rgba[ys, xs]))
+            findings.insert(0, f)       # 다른 1픽셀 수정보다 먼저 적용
+            for x0, y0, x1, y1, area in pr.thin_lines_kept[:50]:
+                findings.append(engine._f(l, type="line_artifact", confidence=UNCERTAIN,
+                                          proposed_action="종이 제거 후 남은 떨어진 가는 선 — 줄기·꽃술인지 자국인지 확인 필요(지우지 않음)",
+                                          evidence={"area_px": area},
+                                          bounds=(x0 + l.bbox[0], y0 + l.bbox[1], x1 + l.bbox[0], y1 + l.bbox[1]),
+                                          pdf_ref="8쪽 정리 안 된 부분"))
+
     if hasattr(engine, "analyze_separation") and cfg.one_color_per_layer:
         lc = {}
         for idx, rgba in layer_rgba.items():
@@ -258,7 +290,7 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         n_changed = int(changed.sum())
         limit = max(64, int(cfg.max_layer_change_ratio * orig.shape[0] * orig.shape[1]))
         reason = None
-        if n_changed > limit:
+        if n_changed > limit and not any(f.type == "paper_removed" for f in applied):   # 종이 제거는 사용자 요청 변환
             reason = f"레이어 변경량 {n_changed}px 가 안전 한도 {limit}px 초과 → 이 레이어 수정 전부 취소"
         if reason is None and engine.name == "apparel":
             # 색상 테스트: 수정으로 새 색이 생기면 안 됨 (원래 레이어에 있던 색 또는 허용 색만)

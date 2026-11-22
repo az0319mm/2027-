@@ -32,7 +32,7 @@ STYLE_PROFILES = {
 
 class InteriorEngine(BaseEngine):
     name = "interior"
-    default_fix_types = frozenset({"isolated_speck", "faint_residue", "odd_pixel", "pinhole"})
+    default_fix_types = frozenset({"isolated_speck", "faint_residue", "odd_pixel", "pinhole", "paper_removed"})
 
     @property
     def profile(self) -> dict:

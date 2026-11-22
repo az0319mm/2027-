@@ -718,3 +718,52 @@ def test_fix_repeats_option_fixes_copied_pixels_but_keeps_dot_patterns(tmp_path)
     assert all(tuple(out[36, cx - 3, :3]) == PINK for cx in (15, 45, 75, 105))
     assert all(out[80, x, 3] == 255 for x in range(10, 110, 6))
     assert r1.summary["changed_pixels_total"] == 4
+
+
+def _scan_on_paper(seed=0):
+    """스캔 수채화 흉내: 종이(질감 노이즈) 위 부드러운 꽃 + 가는 줄기 2개(위에서 만남) + 꽃 안쪽 흰 부분."""
+    rng = np.random.default_rng(seed)
+    S = 160
+    paper = np.array([246, 243, 236], float)
+    img = np.tile(paper, (S, S, 1)) + rng.normal(0, 3, (S, S, 3))
+    yy, xx = np.mgrid[:S, :S]
+    d = np.sqrt((yy - 110) ** 2 + (xx - 80) ** 2)
+    petal = np.clip((30 - d) / 4, 0, 1)                         # 부드러운 꽃 외곽 (수채 번짐)
+    ring = (d > 8) & (d < 30)                                   # 가운데 흰 부분(꽃잎 안쪽, 지름 16)은 종이색 그대로
+    pig = np.array([150, 110, 200], float)
+    img = np.where((ring | (d >= 30))[..., None], img * (1 - petal[..., None]) + pig * petal[..., None], img)
+    for x0 in (60, 100):                                        # 위에서 만나는 두 줄기 → 사이에 길쭉한 종이 띠 갇힘
+        for y in range(20, 85):
+            x = int(x0 + (80 - x0) * (85 - y) / 65)
+            img[y, x - 1:x + 2] = (70, 110, 60)
+    img[18:22, 78:83] = (70, 110, 60)
+    a = np.zeros((S, S), np.uint8)
+    a[6:154, 6:154] = 255                                       # 종이 조각(레이어 경계 안쪽)
+    rgba = np.dstack([np.clip(img, 0, 255), a]).astype(np.uint8)
+    return rgba, paper, d
+
+
+def test_remove_paper_keeps_motif_soft_edges_and_inner_white(tmp_path):
+    rgba, paper, d = _scan_on_paper()
+    bg = rect(blank(160, 160), 0, 160, 0, 160, (5, 0, 254))
+    src = build_psd(tmp_path / "scan.psd", (160, 160), [dict(name="bg", rgba=bg), dict(name="motif", rgba=rgba)])
+    r0 = _run(src, tmp_path / "a", work_type="interior", interior_style="watercolor")
+    assert r0.summary["changed_pixels_total"] == 0 or not any(
+        f["type"] == "paper_removed" for f in r0.qa["findings"])                       # 기본은 지우지 않음
+    r = _run(src, tmp_path / "b", work_type="interior", interior_style="watercolor", remove_paper=True)
+    assert r.status == "ok" and r.summary["verification_passed"]
+    out = _layer_canvas(PSDDocument(r.outputs["clean_psd"]), "motif")
+    assert out[15, 20, 3] == 0 and out[140, 145, 3] == 0                             # 바깥 종이 제거
+    assert out[50, 80, 3] == 0                                                        # 줄기 사이 갇힌 종이 띠 제거
+    assert out[110, 80, 3] == 255                                                     # 꽃잎 안쪽 흰 부분 유지
+    assert out[110, 100, 3] == 255                                                    # 꽃 몸체 유지
+    stem = (rgba[..., 0] == 70) & (rgba[..., 1] == 110)                                # 떨어진 가는 줄기 픽셀
+    assert (out[..., 3][stem] == 255).mean() > 0.95                                   # 가는 줄기 유지
+    edge = (d > 27) & (d < 31)
+    ea = out[..., 3][edge]
+    assert ((ea > 0) & (ea < 255)).mean() > 0.3                                      # 외곽은 부드러운 반투명
+    # 파란 바탕 위에서 외곽에 흰 종이 테두리(헤일로)가 없어야 함: 외곽 합성색이 종이보다 꽃/바탕 쪽
+    al = out[..., 3:4] / 255.0
+    comp = out[..., :3] * al + np.array([5, 0, 254]) * (1 - al)
+    assert comp[edge].mean(axis=0)[0] < 200
+    assert sha256_file(src) == r.qa["input_sha256_before"]

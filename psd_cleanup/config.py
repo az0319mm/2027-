@@ -47,6 +47,7 @@ class ProjectConfig:
     # --- 인테리어 ---
     interior_style: str = "digital"
     paper_color: str | None = None                # 스캔 종이색 "#RRGGBB" (선택)
+    remove_paper: bool = False                    # 인테리어: 스캔 종이 배경 지우기 (사용자가 켰을 때만, 모티브만 남김)
 
     # --- 공통 보호/예외 ---
     protected_layers: list[str] = field(default_factory=list)       # 이름 glob. 완전 보호(수정 금지)

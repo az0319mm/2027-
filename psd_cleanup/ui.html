@@ -60,6 +60,7 @@ img{max-width:100%;border:1px solid var(--line)}
 <select id="style"><option value="digital">디지털 색면</option><option value="watercolor">수채화</option>
 <option value="pencil">색연필</option><option value="crayon">크레파스</option></select></div>
 <div class="row">스캔 종이색 (선택) <input type="text" id="paper" placeholder="#F8F4EA"></div>
+<label><input type="checkbox" id="remove_paper"> 스캔 종이 배경 지우기 (꽃·잎 등 모티브만 남김)</label>
 <div class="row">승인된 질감 레이어 이름 (쉼표, * 사용 가능) <input type="text" id="texture" placeholder="지무늬*, texture"></div>
 </fieldset>
 
@@ -96,6 +97,7 @@ function cfg() {
     c.interior_style = $("style").value;
     if ($("paper").value.trim()) c.paper_color = $("paper").value.trim();
     c.approved_texture_layers = list($("texture").value);
+    c.remove_paper = $("remove_paper").checked;
   }
   return c;
 }
