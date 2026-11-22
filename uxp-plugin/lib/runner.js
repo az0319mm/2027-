@@ -1,10 +1,9 @@
-// 플러그인 ↔ Python 클린업 엔진: 로컬 파일 교환 (~/PSDCleanup/jobs)
-//  export → (엔진 처리) → 결과 읽기 → 복제본에 putPixels → 즉시 재확인 → 새 PSD 저장 → 다시 열어 검증
+// 플러그인 안에서 끝까지: 픽셀 읽기(메모리) → 클린업 엔진(engine/*.js) → 복제본에 적용 → 즉시 재확인 → 새 PSD 저장 → 다시 열어 검증
+// Python·외부 프로그램·임시 파일 없음. 디스크에 쓰는 것은 사용자가 저장을 누른 '_CLEAN.psd'(와 원할 때 보고서)뿐.
 "use strict";
 
 const { walkLayers, stripRefs, compareTrees, crc32 } = require("./layers.js");
-
-const ENGINE_TIMEOUT_MS = 10 * 60 * 1000;
+const P = require("../engine/plan.js");
 
 function toFileUrl(p) {
   let s = String(p).replace(/\\/g, "/");
@@ -20,58 +19,22 @@ function splitPath(p) {
   return { dir: s.slice(0, i), base: dot > 0 ? file.slice(0, dot) : file };
 }
 
-// 투명 픽셀의 색값은 의미가 없으므로 0 으로 정규화한 뒤 지문 (엔진 exchange._trim_layer 와 동일 규칙)
+// 투명 픽셀의 색값은 의미가 없으므로 0 으로 정규화한 뒤 지문 (엔진 trimmedHash 와 같은 규칙)
 function layerHash(data, comps) {
-  if (comps !== 4) {
-    if (comps === 3) return crc32(data);
-    // RGB 외 형식은 그대로
-    return crc32(data);
-  }
+  if (comps !== 4) return crc32(data);
   const d = new Uint8Array(data);
   for (let i = 0; i < d.length; i += 4) if (d[i + 3] === 0) { d[i] = 0; d[i + 1] = 0; d[i + 2] = 0; }
   return crc32(d);
 }
 
-function makeIO(deps) {
-  const { fs, formats, types } = deps;
-  const ab = (u8) => u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
-  return {
-    async folder(path) {
-      try { return await fs.getEntryWithUrl(toFileUrl(path)); }
-      catch (e) { return await fs.createEntryWithUrl(toFileUrl(path), { type: types.folder }); }
-    },
-    async writeBinary(path, u8) {
-      const f = await fs.createEntryWithUrl(toFileUrl(path), { overwrite: true });
-      await f.write(ab(u8), { format: formats.binary });
-    },
-    async writeText(path, text) {
-      const f = await fs.createEntryWithUrl(toFileUrl(path), { overwrite: true });
-      await f.write(text, { format: formats.utf8 });
-    },
-    async readText(path) {
-      const f = await fs.getEntryWithUrl(toFileUrl(path));
-      return await f.read({ format: formats.utf8 });
-    },
-    async readBinary(path) {
-      const f = await fs.getEntryWithUrl(toFileUrl(path));
-      return new Uint8Array(await f.read({ format: formats.binary }));
-    },
-    async exists(path) {
-      try { await fs.getEntryWithUrl(toFileUrl(path)); return true; } catch (e) { return false; }
-    },
-    async rename(path, newName) {
-      const f = await fs.getEntryWithUrl(toFileUrl(path));
-      const parent = await fs.getEntryWithUrl(toFileUrl(splitPath(path).dir));
-      await f.moveTo(parent, { newName, overwrite: true });
-    },
-    async removeFolder(path) {
-      try {
-        const d = await fs.getEntryWithUrl(toFileUrl(path));
-        for (const e of await d.getEntries()) await e.delete();
-        await d.delete();
-      } catch (e) { /* 이미 없음 */ }
-    },
-  };
+async function exists(fs, path) {
+  try { await fs.getEntryWithUrl(toFileUrl(path)); return true; } catch (e) { return false; }
+}
+
+async function renameFile(fs, path, newName) {
+  const f = await fs.getEntryWithUrl(toFileUrl(path));
+  const parent = await fs.getEntryWithUrl(toFileUrl(splitPath(path).dir));
+  await f.moveTo(parent, { newName, overwrite: true });
 }
 
 async function readPixels(imaging, docId, layerId) {
@@ -97,36 +60,18 @@ async function hasUserMask(imaging, docId, layerId) {
   } catch (e) { return false; }
 }
 
-function engineRoot(deps) {
-  return deps.engineRoot || (deps.os.homedir().replace(/\/$/, "") + "/PSDCleanup");
-}
+const tick = () => new Promise((r) => setTimeout(r, 30));      // 패널 글자가 화면에 그려질 틈
 
-async function engineStatus(deps) {
-  const io = makeIO(deps);
-  try {
-    const j = JSON.parse(await io.readText(engineRoot(deps) + "/engine.json"));
-    const age = Date.now() / 1000 - j.time;
-    return { alive: age < 15, age, version: j.version, state: j.state };
-  } catch (e) { return { alive: false, error: "엔진 상태 파일 없음" }; }
-}
-
-// ------------------------------------------------------------------ 1) 내보내기
-async function exportJob(deps, doc, config, kind, log) {
+// ------------------------------------------------------------------ 1) 문서 읽기 (메모리)
+async function readDocument(deps, doc, config, say) {
   const { core, imaging } = deps;
-  const io = makeIO(deps);
-  const say = log || (() => {});
-  const root = engineRoot(deps);
-  await io.folder(root);
-  await io.folder(root + "/jobs");
-  const jobId = "job_" + Date.now().toString(36) + "_" + Math.floor(Math.random() * 1e6).toString(36);
-  const dir = `${root}/jobs/${jobId}`;
-  await io.folder(dir);
+  say = say || (() => {});
   const tree = walkLayers(doc.layers);
   const visAt = [];
   const layers = [];
+  const pixels = new Map();      // order → Uint8Array (알파>0 영역으로 잘린 레이어)
   const orig = {};               // order → {hash, bounds, components}
-  let profile = null;
-  let composite = null;
+  let profile = null, composite = null, compositeData = null;
   await core.executeAsModal(async () => {
     for (const l of tree) {
       visAt[l.depth] = l.visible && (l.depth === 0 || visAt[l.depth - 1]);
@@ -136,9 +81,7 @@ async function exportJob(deps, doc, config, kind, log) {
         try {
           const px = await readPixels(imaging, doc.id, l.id);
           profile = profile || px.colorProfile;
-          const f = `layer_${l.order}.raw`;
-          await io.writeBinary(`${dir}/${f}`, px.data);
-          e.file = f;
+          pixels.set(l.order, px.data);
           e.bounds = px.bounds;
           e.components = px.components;
           e.hasMask = await hasUserMask(imaging, doc.id, l.id);
@@ -148,62 +91,64 @@ async function exportJob(deps, doc, config, kind, log) {
         }
       }
       layers.push(e);
-      say(`내보내기: ${l.path}`);
+      say(`읽기: ${l.path}`);
     }
     try {
       const c = await readPixels(imaging, doc.id, null);
-      await io.writeBinary(`${dir}/composite.raw`, c.data);
-      composite = { file: "composite.raw", components: c.components, bounds: c.bounds };
-    } catch (err) { /* 합성 이미지는 선택 */ }
-  }, { commandName: "클린업: 레이어 픽셀 내보내기" });
+      compositeData = c.data;
+      composite = { components: c.components, bounds: c.bounds };
+    } catch (err) { /* 합성 이미지는 선택 (없으면 엔진이 근사 합성) */ }
+  }, { commandName: "클린업: 레이어 픽셀 읽기" });
   const req = {
-    version: 1, job_id: jobId, kind, created: Date.now(),
+    version: 1, created: Date.now(),
     document: { name: doc.name, path: doc.path || "", width: Number(doc.width), height: Number(doc.height),
                 resolution: Number(doc.resolution), mode: String(doc.mode), bitsPerChannel: String(doc.bitsPerChannel),
                 colorProfileName: String(doc.colorProfileName) },
     config, layers, composite,
   };
-  // request.json 은 마지막에, 임시 이름으로 쓴 뒤 이름을 바꿔 '준비 완료'를 알림 (엔진이 반쯤 쓴 파일을 읽지 않게)
-  await io.writeText(`${dir}/request.json.part`, JSON.stringify(req));
-  await io.rename(`${dir}/request.json.part`, "request.json");
-  return { jobId, dir, tree, orig, profile, req };
+  return { tree, orig, profile, req, data: { layers: pixels, composite: compositeData } };
 }
 
-// ------------------------------------------------------------------ 2) 결과 기다리기
-async function waitResult(deps, job, onProgress) {
-  const io = makeIO(deps);
+// ------------------------------------------------------------------ 2) 엔진 실행 (플러그인 안 JavaScript)
+async function analyze(snap, kind, onProgress) {
+  if (onProgress) onProgress(0.02, "검사 시작 (큰 PSD 는 1분 정도 걸리고, 그동안 Photoshop 이 멈춘 듯 보일 수 있습니다)");
+  await tick();
   const t0 = Date.now();
-  let lastAliveCheck = 0;
-  let deadSince = 0;
-  for (;;) {
-    if (await io.exists(`${job.dir}/result.json`)) {
-      return JSON.parse(await io.readText(`${job.dir}/result.json`));
-    }
-    let progressFresh = false;
-    try {
-      const p = JSON.parse(await io.readText(`${job.dir}/progress.json`));
-      if (onProgress) onProgress(p.progress, p.message);
-      progressFresh = Date.now() / 1000 - p.time < 60;          // 진행률이 갱신 중이면 엔진은 살아 있음
-    } catch (e) { /* 아직 없음 */ }
-    if (Date.now() - lastAliveCheck > 5000) {
-      lastAliveCheck = Date.now();
-      const st = await engineStatus(deps);
-      if (st.alive || progressFresh) deadSince = 0;
-      else if (!deadSince) deadSince = Date.now();
-      if (deadSince && Date.now() - deadSince > 30000) {
-        throw new Error("클린업 엔진 응답이 30초 넘게 없습니다. 'PSD 클린업 엔진 설치.command'를 다시 실행하거나 ~/PSDCleanup/engine.log 를 보내 주세요.");
+  const r = P.runCleanup(snap.req, snap.data, kind, onProgress);
+  r.summary.elapsed_sec = Math.round((Date.now() - t0) / 100) / 10;
+  r.changes = changedPoints(snap, r.patches);
+  delete r._doc;
+  delete r._plan;
+  return r;
+}
+
+// 패치로 실제 바뀌는 캔버스 좌표 (비교 화면·보고서용)
+function changedPoints(snap, patches) {
+  const pts = [];
+  for (const p of patches) {
+    const L = snap.req.layers[p.order], src = snap.data.layers.get(p.order);
+    const b = L.bounds, w = b[2] - b[0], c = p.components;
+    for (let y = 0; y < p.height; y++) for (let x = 0; x < p.width; x++) {
+      const cx = p.left + x, cy = p.top + y, s = (y * p.width + x) * c;
+      let before = null;
+      if (src && cx >= b[0] && cx < b[2] && cy >= b[1] && cy < b[3]) before = ((cy - b[1]) * w + (cx - b[0])) * c;
+      let diff = false;
+      for (let k = 0; k < c; k++) {
+        const ov = before === null ? 0 : src[before + k];
+        if (ov !== p.data[s + k]) { diff = true; break; }
       }
+      if (c === 4 && before !== null && src[before + 3] === 0 && p.data[s + 3] === 0) diff = false;
+      if (c === 4 && before === null && p.data[s + 3] === 0) diff = false;
+      if (diff) pts.push([cx, cy, p.path]);
     }
-    if (Date.now() - t0 > ENGINE_TIMEOUT_MS) throw new Error("엔진 응답 시간 초과");
-    await new Promise((r) => setTimeout(r, deps.pollMs || 500));
   }
+  return pts;
 }
 
 // ------------------------------------------------------------------ 3) 복제본에 적용 + 즉시 검증
-async function applyToDuplicate(deps, doc, job, result, log) {
+async function applyToDuplicate(deps, doc, snap, result, say) {
   const { core, imaging } = deps;
-  const io = makeIO(deps);
-  const say = log || (() => {});
+  say = say || (() => {});
   const problems = [];
   let dup = null;
   if (!result.patches || result.patches.length === 0) return { dup: null, applied: 0, problems };
@@ -211,15 +156,14 @@ async function applyToDuplicate(deps, doc, job, result, log) {
   await core.executeAsModal(async () => {
     dup = await doc.duplicate(`${base}_CLEAN`);
     const dupTree = walkLayers(dup.layers);
-    if (dupTree.length !== job.tree.length) throw new Error("복제본의 레이어 수가 원본과 다름");
+    if (dupTree.length !== snap.tree.length) throw new Error("복제본의 레이어 수가 원본과 다름");
     for (const p of result.patches) {
       const t = dupTree[p.order];
       if (!t || t.path !== p.path) { problems.push(`복제본에서 레이어를 찾지 못함: ${p.path}`); continue; }
-      const data = await io.readBinary(`${job.dir}/${p.file}`);
-      if (data.length !== p.width * p.height * p.components) { problems.push(`패치 크기 오류: ${p.path}`); continue; }
-      const img = await imaging.createImageDataFromBuffer(data, {
+      if (p.data.length !== p.width * p.height * p.components) { problems.push(`패치 크기 오류: ${p.path}`); continue; }
+      const img = await imaging.createImageDataFromBuffer(p.data, {
         width: p.width, height: p.height, components: p.components, chunky: true,
-        colorSpace: "RGB", colorProfile: job.profile || undefined,
+        colorSpace: "RGB", colorProfile: snap.profile || undefined,
       });
       await imaging.putPixels({ documentID: dup.id, layerID: t.id, imageData: img,
                                 targetBounds: { left: p.left, top: p.top }, replace: true, commandName: "자동 클린업" });
@@ -230,7 +174,7 @@ async function applyToDuplicate(deps, doc, job, result, log) {
     const patched = {};
     result.patches.forEach((p) => { patched[p.order] = p; });
     for (const l of dupTree) {
-      if (l.kind !== "pixel" || !job.orig[l.order]) continue;
+      if (l.kind !== "pixel" || !snap.orig[l.order]) continue;
       let got;
       try { got = await readPixels(imaging, dup.id, l.id); } catch (e) { got = null; }
       const p = patched[l.order];
@@ -241,25 +185,83 @@ async function applyToDuplicate(deps, doc, job, result, log) {
                    JSON.stringify(got.bounds) !== JSON.stringify(p.expected_bounds)) {
           problems.push(`${l.path}: 적용 결과가 엔진 계산과 다름`);
         }
-      } else if (!got || layerHash(got.data, got.components) !== job.orig[l.order].hash) {
+      } else if (!got || layerHash(got.data, got.components) !== snap.orig[l.order].hash) {
         problems.push(`${l.path}: 수정하지 않은 레이어가 바뀜`);
       }
     }
-    if (problems.length) { dup.closeWithoutSaving(); dup = null; }     // 불확실하면 적용하지 않음
+    if (problems.length) { await dup.closeWithoutSaving(); dup = null; }     // 불확실하면 적용하지 않음
   }, { commandName: "클린업: 복제본에 적용" });
   return { dup, applied: problems.length ? 0 : result.patches.length, problems };
 }
 
-// ------------------------------------------------------------------ 4) 새 PSD 로 저장 + 다시 열어 검증
-async function saveAndVerify(deps, doc, dup, job, result, log) {
+// ------------------------------------------------------------------ 4) 전후 비교 문서 (저장하지 않는 새 문서)
+//  레이어: 수정 전 / 수정 후 / 바뀐 곳(빨강) — 눈 아이콘으로 '수정 후'를 껐다 켜며 비교
+async function makeCompareDoc(deps, srcDoc, dup, result, say) {
+  const { core, imaging, app } = deps;
+  say = say || (() => {});
+  const W = Number(srcDoc.width), H = Number(srcDoc.height);
+  let cmp = null;
+  await core.executeAsModal(async () => {
+    const before = await readPixels(imaging, srcDoc.id, null);
+    const after = await readPixels(imaging, dup.id, null);
+    cmp = await app.documents.add({ name: `${splitPath(srcDoc.name).base}_전후비교`, width: W, height: H,
+                                    resolution: Number(srcDoc.resolution) || 72, mode: "RGBColorMode", fill: "white" });
+    const put = async (name, rgba) => {
+      const layer = await cmp.createLayer("pixel", { name });
+      const img = await imaging.createImageDataFromBuffer(rgba, { width: W, height: H, components: 4, chunky: true, colorSpace: "RGB" });
+      await imaging.putPixels({ documentID: cmp.id, layerID: layer.id, imageData: img, targetBounds: { left: 0, top: 0 },
+                                replace: true, commandName: "전후 비교" });
+      if (img.dispose) await img.dispose();
+      return layer;
+    };
+    await put("수정 전 (원본)", toRGBA(before, W, H));
+    await put("수정 후 (눈 아이콘으로 껐다 켜기)", toRGBA(after, W, H));
+    await put("바뀐 곳 (빨강 점·원)", markLayer(result.changes || [], W, H));
+  }, { commandName: "클린업: 전후 비교 문서 만들기" });
+  say(`전후 비교 문서 '${cmp.name}' (저장되지 않음 — 다 보면 닫으세요)`);
+  return cmp;
+}
+
+function toRGBA(px, W, H) {
+  const out = new Uint8Array(W * H * 4).fill(255);
+  const [x0, y0, x1, y1] = px.bounds, w = x1 - x0, c = px.components;
+  for (let y = Math.max(0, y0); y < Math.min(H, y1); y++) for (let x = Math.max(0, x0); x < Math.min(W, x1); x++) {
+    const s = ((y - y0) * w + (x - x0)) * c, t = (y * W + x) * 4;
+    out[t] = px.data[s]; out[t + 1] = px.data[s + 1]; out[t + 2] = px.data[s + 2];
+    out[t + 3] = c === 4 ? 255 : 255;
+  }
+  return out;
+}
+
+// 바뀐 픽셀은 빨강, 주변은 빨간 원 (원 반지름은 그림 크기에 비례해 작은 수정도 보이게)
+function markLayer(points, W, H) {
+  const out = new Uint8Array(W * H * 4);
+  const R = Math.max(10, Math.round(Math.max(W, H) / 150)), T = Math.max(2, Math.round(R / 6));
+  const seen = new Set();
+  const red = (x, y) => { if (x >= 0 && y >= 0 && x < W && y < H) out.set([255, 0, 0, 255], (y * W + x) * 4); };
+  for (const [x, y] of points) {
+    const key = `${Math.floor(x / R)},${Math.floor(y / R)}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      for (let dy = -R - T; dy <= R + T; dy++) for (let dx = -R - T; dx <= R + T; dx++) {
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d >= R && d < R + T) red(x + dx, y + dy);
+      }
+    }
+  }
+  for (const [x, y] of points) red(x, y);
+  return out;
+}
+
+// ------------------------------------------------------------------ 5) 새 PSD 로 저장 + 다시 열어 검증
+async function saveAndVerify(deps, doc, dup, snap, result, say) {
   const { core, imaging, app, fs } = deps;
-  const io = makeIO(deps);
-  const say = log || (() => {});
+  say = say || (() => {});
   const sp = splitPath(doc.path || doc.name);
   let outPath, picked = null;
   if (doc.path) {
     outPath = `${sp.dir}/${sp.base}_CLEAN.psd`;
-    for (let k = 2; (await io.exists(outPath)) && k < 100; k++) outPath = `${sp.dir}/${sp.base}_CLEAN_${k}.psd`;
+    for (let k = 2; (await exists(fs, outPath)) && k < 100; k++) outPath = `${sp.dir}/${sp.base}_CLEAN_${k}.psd`;
   } else {                                          // 한 번도 저장하지 않은 문서 → 저장 위치를 물어봄
     picked = await fs.getFileForSaving(`${sp.base}_CLEAN.psd`, { types: ["psd"] });
     if (!picked) throw new Error("저장을 취소했습니다");
@@ -271,12 +273,11 @@ async function saveAndVerify(deps, doc, dup, job, result, log) {
   await core.executeAsModal(async () => {
     const entry = picked || await fs.createEntryWithUrl(toFileUrl(outPath), { overwrite: false });
     await dup.saveAs.psd(entry, { embedColorProfile: true }, false);
-    dup.closeWithoutSaving();
+    await dup.closeWithoutSaving();
     re = await app.open(await fs.getEntryWithUrl(toFileUrl(outPath)));
   }, { commandName: "클린업: 새 PSD 저장" });
   say(`저장: ${outPath}`);
-  // 문서 속성
-  const d = job.req.document;
+  const d = snap.req.document;
   const dd = [];
   for (const [k, v] of [["width", Number(re.width)], ["height", Number(re.height)], ["resolution", Number(re.resolution)],
     ["mode", String(re.mode)], ["bitsPerChannel", String(re.bitsPerChannel)], ["colorProfileName", String(re.colorProfileName)]]) {
@@ -286,16 +287,15 @@ async function saveAndVerify(deps, doc, dup, job, result, log) {
   // 레이어 구조 (수정한 레이어는 경계가 바뀔 수 있으므로 경계는 엔진 예상값과 비교)
   const patched = {};
   (result.patches || []).forEach((p) => { patched[p.order] = p; });
-  const a = stripRefs(job.tree).map((x) => (patched[x.order] ? Object.assign({}, x, { bounds: null }) : x));
+  const a = stripRefs(snap.tree).map((x) => (patched[x.order] ? Object.assign({}, x, { bounds: null }) : x));
   const reTree = walkLayers(re.layers);
   const b = stripRefs(reTree).map((x) => (patched[x.order] ? Object.assign({}, x, { bounds: null }) : x));
   const probs = compareTrees(a, b);
   checks.push({ name: "레이어 이름·그룹·순서·가시성·불투명도·블렌드·잠금·위치", ok: probs.length === 0, detail: probs.slice(0, 6).join(" | ") });
-  // 픽셀
   const pixProbs = [];
   await core.executeAsModal(async () => {
     for (const l of reTree) {
-      const o = job.orig[l.order];
+      const o = snap.orig[l.order];
       if (l.kind !== "pixel" || !o) continue;
       let got = null;
       try { got = await readPixels(imaging, re.id, l.id); } catch (e) { got = null; }
@@ -311,13 +311,13 @@ async function saveAndVerify(deps, doc, dup, job, result, log) {
   checks.push({ name: "픽셀: 수정한 곳만 바뀌고 나머지는 원본과 동일", ok: pixProbs.length === 0, detail: pixProbs.slice(0, 6).join(" | ") });
   const passed = checks.every((c) => c.ok);
   if (!passed) {
-    await core.executeAsModal(async () => { re.closeWithoutSaving(); }, { commandName: "클린업: 검증 실패 파일 닫기" });
+    await core.executeAsModal(async () => { await re.closeWithoutSaving(); }, { commandName: "클린업: 검증 실패 파일 닫기" });
     const failedName = `${splitPath(outPath).base}_VERIFY_FAILED.psd`;
-    await io.rename(outPath, failedName);
+    await renameFile(fs, outPath, failedName);
     outPath = `${splitPath(outPath).dir}/${failedName}`;
   }
   return { outPath, passed, checks, reopened: passed ? re : null };
 }
 
-module.exports = { exportJob, waitResult, applyToDuplicate, saveAndVerify, engineStatus, engineRoot,
-                   makeIO, layerHash, toFileUrl, splitPath };
+module.exports = { readDocument, analyze, applyToDuplicate, makeCompareDoc, saveAndVerify, changedPoints, markLayer,
+                   layerHash, toFileUrl, splitPath, readPixels };

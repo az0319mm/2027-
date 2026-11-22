@@ -1,18 +1,16 @@
-// node run_bridge.js <scenario> <tmpdir> <python> <repo>
-// 플러그인 교환 코드(bridge.js) + 실제 Python 엔진을 끝까지 연결해 실행 (Photoshop 은 모의)
+// node run_runner.js <scenario> <tmpdir>
+// 플러그인 전체 흐름(lib/runner.js + 내장 JS 엔진)을 모의 Photoshop 에서 끝까지 실행 — Python 없음
 "use strict";
 const pathm = require("path");
 const fsn = require("fs");
-const { execFileSync } = require("child_process");
 const { makeEnv, Layer } = require("./mock_disk.js");
-const B = require("../../uxp-plugin/lib/bridge.js");
+const R = require("../../uxp-plugin/lib/runner.js");
+const { buildReport } = require("../../uxp-plugin/lib/report.js");
 
 (async () => {
-  const [scenario, tmp, py, repo] = process.argv.slice(2);
+  const [scenario, tmp] = process.argv.slice(2);
   const W = 120, H = 90;
   const env = makeEnv(scenario === "corrupt_save" ? { corruptSave: (s) => s.replace('"opacity":80', '"opacity":79') } : {});
-  env.engineRoot = pathm.join(tmp, "PSDCleanup");
-  env.pollMs = 20;
   const motif = new Uint8Array(W * H * 4);
   const set = (x, y, r, g, b, a) => motif.set([r, g, b, a], (y * W + x) * 4);
   for (let y = 10; y < 50; y++) for (let x = 10; x < 60; x++) set(x, y, 220, 80, 120, 255);
@@ -32,29 +30,33 @@ const B = require("../../uxp-plugin/lib/bridge.js");
   ] });
   env.app.activeDocument = doc;
   const logs = [];
-  const job = await B.exportJob(env, doc, { work_type: "apparel" }, "cleanup", (m) => logs.push(m));
-  execFileSync(py, ["-m", "psd_cleanup", "process-job", job.dir],
-               { cwd: repo, env: Object.assign({}, process.env, { PYTHONPATH: repo }) });
-  if (scenario === "tamper") {             // 패치 파일 변조 → 적용 직후 재확인에서 잡혀야 함
-    const p = pathm.join(job.dir, "patch_1.raw");
-    const b = fsn.readFileSync(p);
-    b[0] ^= 0xff;
-    fsn.writeFileSync(p, b);
+  const cfg = { work_type: "apparel", repeat: "none" };
+  const snap = await R.readDocument(env, doc, cfg);
+  const analysis = await R.analyze(snap, "recheck");
+  const result = await R.analyze(snap, "cleanup", () => {});
+  if (scenario === "tamper") result.patches[0].data[0] ^= 0xff;    // 패치 변조 → 적용 직후 재확인에서 잡혀야 함
+  const ap = await R.applyToDuplicate(env, doc, snap, result, (m) => logs.push(m));
+  let saved = null, compare = null, recheck = null;
+  if (ap.dup) {
+    const cmp = await R.makeCompareDoc(env, doc, ap.dup, result, (m) => logs.push(m));
+    compare = { name: cmp.name, layers: cmp.layers.map((l) => l.name),
+                red: Array.from(cmp.layers[0].pixels).filter((v, i) => i % 4 === 3 && v === 255).length };
+    cmp.closeWithoutSaving();
+    const rsnap = await R.readDocument(env, ap.dup, cfg);
+    recheck = await R.analyze(rsnap, "recheck");
+    saved = await R.saveAndVerify(env, doc, ap.dup, snap, result, (m) => logs.push(m));
   }
-  const result = await B.waitResult(env, job);
-  const ap = await B.applyToDuplicate(env, doc, job, result, (m) => logs.push(m));
-  let saved = null;
-  if (ap.dup) saved = await B.saveAndVerify(env, doc, ap.dup, job, result, (m) => logs.push(m));
-  const io = B.makeIO(env);
-  await io.removeFolder(job.dir);
+  const html = buildReport({ docName: doc.name, config: cfg, cleanup: result, recheck, saved, date: "test" });
   console.log(JSON.stringify({
-    status: result.status, error: result.error, applied: result.summary && result.summary.applied_fixes,
-    patches: result.patches && result.patches.map((p) => [p.path, p.changed_pixels]),
-    skipped: (result.skipped_layers || []).map((x) => x.path), applyProblems: ap.problems,
+    analysisApplied: analysis.summary.applied_fixes, analysisPatches: analysis.patches.length,
+    applied: result.summary.applied_fixes,
+    patches: result.patches.map((p) => [p.path, p.changed_pixels]), changes: result.changes.map((c) => c.slice(0, 2)),
+    skipped: result.skipped_layers.map((x) => x.path), applyProblems: ap.problems, compare,
+    recheckApplicable: recheck && recheck.summary.findings_by_confidence.certain || 0,
     saved: saved && { outPath: pathm.basename(saved.outPath), passed: saved.passed, checks: saved.checks },
+    reportOk: html.includes("PSD 클린업 QA") && html.includes("작품.psd"),
     originalFile: fsn.readFileSync(origPath, "utf8"),
     originalDocUntouched: doc.layers[0].layers[0].pixels[(30 * W + 60) * 4 + 3] === 255,
     openDocs: env.docs.map((d) => d.name), files: fsn.readdirSync(tmp).sort(),
-    jobsLeft: fsn.readdirSync(pathm.join(tmp, "PSDCleanup", "jobs")),
   }));
 })().catch((e) => { console.error(e.stack || e); process.exit(1); });

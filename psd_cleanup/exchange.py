@@ -37,7 +37,9 @@ def crc32_hex(data: bytes | np.ndarray) -> str:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    tmp = path.with_name(".tmp_" + path.name)
+    import threading
+    # 스레드마다 다른 임시 이름 (생존 신호 스레드와 작업 처리가 같은 파일을 동시에 쓰면 이름이 겹쳐 실패하던 문제)
+    tmp = path.with_name(f".tmp_{os.getpid()}_{threading.get_ident()}_" + path.name)
     with open(tmp, "wb") as f:
         f.write(data)
         f.flush()

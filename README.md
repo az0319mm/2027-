@@ -1,6 +1,6 @@
 # 2027 졸업작품 PSD 자동 클린업
 
-> **macOS 설치·사용 방법 (Photoshop 패널 + 백그라운드 엔진): [docs/macOS_설치_및_사용_가이드.md](docs/macOS_설치_및_사용_가이드.md)**
+> **macOS 설치·사용 방법 (Photoshop 플러그인 하나만 Load — Python·터미널 불필요): [docs/macOS_설치_및_사용_가이드.md](docs/macOS_설치_및_사용_가이드.md)**
 > 연동 진단(1단계 테스트) 안내: [docs/1단계_Photoshop_플러그인_설치_테스트_가이드.md](docs/1단계_Photoshop_플러그인_설치_테스트_가이드.md)
 
 원본 PSD/PSB를 넣으면 **어패럴 / 인테리어** 유형별 규칙으로 레이어를 검사하고, **확실한 오류만** 고친 뒤
@@ -61,17 +61,15 @@ python -m psd_cleanup run 작품.psd --config examples/apparel_project.json
 옵션: `--out 출력폴더`(기본값: 입력폴더/_cleanup_output), `--recursive`, `--protect-layer "이름*"`, `--no-fix`,
 `--overwrite-outputs`(이전 **결과 파일만** 덮어씀), `--save-config 설정.json`
 
-### 사용 방법 C — Photoshop 패널 (UXP 플러그인) ⚠ 미검증
-1. 터미널에서 `python -m psd_cleanup serve` 실행 (UXP는 Python을 직접 실행할 수 없어서 로컬 서버를 경유합니다)
-2. **Adobe UXP Developer Tool** → *Add Plugin* → `uxp-plugin/manifest.json` 선택 → *Load*
-3. Photoshop의 *플러그인 > PSD 클린업* 패널을 엽니다.
-   - **레이어 읽기·대조**: Photoshop이 보여 주는 레이어 트리와 이 도구가 파일에서 읽은 트리를 비교합니다(1단계 검증).
-   - **자동 클린업 실행**: 저장된 현재 문서를 처리한 뒤 `_CLEAN.psd`를 **Photoshop에서 다시 열고** 레이어 구조를 원본과 비교합니다.
-4. 문서를 먼저 저장해야 합니다(디스크의 원본 파일을 기준으로 처리).
+### 사용 방법 C — Photoshop 패널 (UXP 플러그인, 엔진 내장) — 권장
+설치·사용: [docs/macOS_설치_및_사용_가이드.md](docs/macOS_설치_및_사용_가이드.md). UXP Developer Tools에서 `uxp-plugin/manifest.json`을 Load 하면 끝입니다.
 
-> UXP 패널은 이 개발 환경에 Photoshop이 없어 **실제 Photoshop에서 한 번도 실행하지 못했습니다.**
-> 레이어 대조 로직(`uxp-plugin/compare.js`)만 Node로 단위 테스트했습니다.
-> 확인이 필요한 항목: manifest v5 로드, `http://127.0.0.1` 네트워크 권한, `getEntryWithUrl` + `app.open`, `executeAsModal`, Spectrum UI 위젯 값 읽기.
+- 클린업 엔진을 JavaScript로 옮겨 플러그인 안(`uxp-plugin/engine/`)에 넣었습니다. Python·로컬 서버·백그라운드 프로그램·임시 파일이 없습니다.
+- 이 JS 엔진은 Python 엔진과 **같은 입력에 같은 수정 픽셀**을 내는지 `tests/test_js_parity.py`로 비교합니다
+  (합성 사례 14종 일치, 실제 분판 PSD 28SS5-A002KGY03 4200×3600에서 두 설정 모두 일치 · JS 약 16초 / Python 약 86초).
+- 패널 흐름(읽기 → 계산 → 복제본 적용 → 즉시 재확인 → 저장 → 다시 열어 검증, 전후 비교 문서, 보고서)은 모의 Photoshop으로
+  `tests/uxp_mock/run_runner.js`에서 끝까지 검증합니다. **실제 Photoshop에서의 0.3.0 전체 흐름은 미검증**입니다(0.2.x에서 Load·픽셀 읽기는 사용자 Mac에서 확인).
+- Python 엔진(`psd_cleanup/`)은 명령줄·브라우저 화면용과 JS 엔진의 기준(정답) 구현으로 계속 유지합니다.
 
 ---
 
@@ -184,7 +182,7 @@ python -m psd_cleanup run 작품.psd --config examples/apparel_project.json
 
 ## 5. 검증 현황 (이 개발 환경에서 실제 실행한 것)
 
-### 자동 테스트 — `python -m pytest tests` → **68개 전부 통과** (플러그인 ↔ 엔진 파일 교환 끝까지 연결 테스트, 모의 Photoshop 연동 테스트 포함)
+### 자동 테스트 — `python -m pytest tests` → **84개 전부 통과** (JS 내장 엔진 ↔ Python 엔진 결과 일치 14종, 모의 Photoshop 플러그인 전체 흐름 포함)
 명세서 5장 항목별 대응:
 
 | # | 테스트 | 결과 |
@@ -238,7 +236,7 @@ psd_cleanup/
   report.py        QA.html / DIFF / FIXES / BGCHECK
   server.py, ui.html  127.0.0.1 전용 로컬 서버 + 브라우저 화면
   cli.py           명령줄
-uxp-plugin/        Photoshop UXP 패널 (manifest v5, index.js, compare.js)
+uxp-plugin/        Photoshop UXP 패널 (manifest v5). engine/ = 내장 클린업 엔진(JS), lib/runner.js = 읽기·적용·저장·검증
 tests/             pytest (psd_factory.py = 테스트 PSD 생성기)
 tools/             eval_injected.py(결함 주입 평가), eval_pairs.py(골든 쌍 평가), make_sample.py
 examples/          샘플 PSD 3개 + 프로젝트 설정 JSON 예시

@@ -45,6 +45,16 @@ def estimate_paper(rgba: np.ndarray) -> tuple[int, int, int] | None:
     return tuple(int(v) for v in np.median(px, axis=0))
 
 
+def edt_to_zero(mask: np.ndarray, border_is_zero: bool) -> np.ndarray:
+    """mask 의 True 픽셀에서 가장 가까운 False 픽셀까지의 유클리드 거리.
+    border_is_zero=True 면 레이어 바깥을 False(투명)로 본다. False 픽셀이 하나도 없으면 무한대.
+    (scipy 는 False 가 없을 때 임의 기준점을 쓰므로 직접 처리)"""
+    P = np.pad(mask, 1, constant_values=not border_is_zero)
+    if P.all():
+        return np.full(mask.shape, np.inf)
+    return ndimage.distance_transform_edt(P)[1:-1, 1:-1]
+
+
 def _disk(r: int) -> np.ndarray:
     yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
     return (yy * yy + xx * xx) <= r * r
@@ -64,7 +74,7 @@ def remove_paper(rgba: np.ndarray, paper_rgb: tuple[int, int, int] | None = None
     present = a0 > 0
     dist = np.abs(rgb - p).max(axis=2)                       # 종이색과의 차이(채널 최대)
     # 종이 가장자리(투명과 맞닿은 곳에서 edge_band px 이내)의 선·그림자는 '벽'이 되지 않도록 물감 판정에서 제외
-    d_edge = ndimage.distance_transform_edt(present)
+    d_edge = edt_to_zero(present, border_is_zero=False)       # 레이어 경계는 종이 가장자리로 보지 않음 (캔버스에서 잘린 모티브 보호)
     ink = present & (dist > ink_thr) & (d_edge > edge_band)
     # 옅은 물감(흰 꽃잎의 회색 음영, 옅은 수채 번짐): 종이 질감 노이즈보다 확실히 진하고
     # 진한 물감과 이어져 있으면 모티브로 인정 (종이 질감은 이 기준 아래라 퍼지지 않음)
@@ -112,7 +122,7 @@ def remove_paper(rgba: np.ndarray, paper_rgb: tuple[int, int, int] | None = None
     if n3 > 1:
         sizes3 = np.bincount(lab3.ravel())
         main = sizes3[1:].max()
-        dt = ndimage.distance_transform_edt(keep)
+        dt = edt_to_zero(keep, border_is_zero=False)
         rmax = ndimage.maximum(dt, lab3, index=np.arange(1, n3 + 1))
         near_edge = ndimage.mean((d_edge <= 4 * edge_band).astype(float), lab3, index=np.arange(1, n3 + 1))
         slices = ndimage.find_objects(lab3)
@@ -131,8 +141,8 @@ def remove_paper(rgba: np.ndarray, paper_rgb: tuple[int, int, int] | None = None
 
     # 4) 외곽 띠: 모티브 경계 안팎 band px 은 물감 농도로 부드러운 알파 + 종이색 un-multiply
     outside = present & ~keep
-    d_out = ndimage.distance_transform_edt(~outside)          # 바깥 종이까지 거리
-    d_in = ndimage.distance_transform_edt(~keep)             # 모티브까지 거리
+    d_out = edt_to_zero(~outside, border_is_zero=False)       # 바깥 종이까지 거리
+    d_in = edt_to_zero(~keep, border_is_zero=False)           # 모티브까지 거리
     edge_in = keep & (d_out <= band)                         # 모티브 안쪽 테두리 (옅은 물감 포함)
     edge_out = outside & (d_in <= band)                      # 바깥 바로 옆 번짐
     soft = edge_in | edge_out

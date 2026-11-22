@@ -66,12 +66,25 @@ function makeEnv(opts) {
       app.activeDocument = d;
       return d;
     }
+    async createLayer(kind, o) {
+      if (kind !== "pixel") throw new Error("kind");
+      const l = new Layer(Object.assign({ kind: "pixel", bounds: { left: 0, top: 0, right: 0, bottom: 0 },
+                                          pixels: new Uint8Array(this.width * this.height * 4) }, o || {}));
+      this.layers.unshift(l);
+      return l;
+    }
     closeWithoutSaving() {
       const i = docs.indexOf(this);
       if (i >= 0) docs.splice(i, 1);
       app.activeDocument = docs[docs.length - 1] || null;
     }
   }
+  docs.add = async (o) => {
+    need();
+    const d = new Document({ name: o.name, path: "", width: o.width, height: o.height, resolution: o.resolution, layers: [], saved: false });
+    app.activeDocument = d;
+    return d;
+  };
   function load(p) {
     const j = JSON.parse(fsn.readFileSync(p, "utf8"));
     const des = (ls) => ls.map((l) => new Layer(Object.assign({}, l, {

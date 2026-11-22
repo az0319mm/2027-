@@ -143,18 +143,20 @@ def test_uxp_phase1_flow_on_mock_photoshop(tmp_path, scenario, should_pass):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node 없음")
 @pytest.mark.parametrize("scenario", ["ok", "tamper", "corrupt_save"])
-def test_plugin_engine_file_exchange_end_to_end(tmp_path, scenario):
-    """플러그인 교환 코드(bridge.js) + 실제 Python 엔진, Photoshop 은 모의."""
-    import sys
-    out = subprocess.run(["node", str(ROOT / "tests" / "uxp_mock" / "run_bridge.js"), scenario, str(tmp_path),
-                          sys.executable, str(ROOT)], capture_output=True, text=True, check=True).stdout
+def test_plugin_builtin_engine_end_to_end(tmp_path, scenario):
+    """플러그인 전체 흐름(runner.js + 내장 JS 엔진), Photoshop 은 모의. Python 엔진·임시 파일 없음."""
+    out = subprocess.run(["node", str(ROOT / "tests" / "uxp_mock" / "run_runner.js"), scenario, str(tmp_path)],
+                         capture_output=True, text=True, check=True).stdout
     r = json.loads(out)
-    assert r["status"] == "ok" and r["originalFile"] == "ORIGINAL" and r["originalDocUntouched"]
-    assert r["skipped"] == ["스마트"] and r["jobsLeft"] == []
+    assert r["originalFile"] == "ORIGINAL" and r["originalDocUntouched"] and r["reportOk"]
+    assert r["skipped"] == ["스마트"] and r["analysisPatches"] == 0
+    assert r["patches"] == [["그룹/모티브", 3]] and r["changes"] == [[30, 25], [60, 30], [100, 70]]
     if scenario == "ok":
         assert r["saved"]["passed"] and r["saved"]["outPath"] == "작품_CLEAN.psd"
-        assert r["patches"] == [["그룹/모티브", 3]]
+        assert r["files"] == ["작품.psd", "작품_CLEAN.psd"]          # PSD 말고 다른 파일은 생기지 않음
+        assert r["compare"]["layers"][0].startswith("바뀐 곳") and r["compare"]["red"] > 0
+        assert r["recheckApplicable"] == 0
     elif scenario == "tamper":
-        assert r["saved"] is None and r["applyProblems"] and "작품_CLEAN.psd" not in r["files"]
+        assert r["saved"] is None and r["applyProblems"] and r["files"] == ["작품.psd"] and r["openDocs"] == ["작품.psd"]
     else:
         assert r["saved"]["passed"] is False and r["saved"]["outPath"].endswith("_VERIFY_FAILED.psd")

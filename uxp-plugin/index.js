@@ -1,12 +1,14 @@
 // Photoshop UXP 패널: 분석 → 자동 클린업(복제본) → 전후 비교 → 재검사 → 새 PSD 저장 → 보고서 저장
+// 클린업 엔진은 플러그인 안(engine/*.js)에 들어 있어 따로 설치할 프로그램이 없습니다.
 const { app, core, imaging } = require("photoshop");
 const uxp = require("uxp");
 const os = require("os");
 const fs = uxp.storage.localFileSystem;
 const formats = uxp.storage.formats;
 const types = uxp.storage.types;
-const B = require("./lib/bridge.js");
+const R = require("./lib/runner.js");
 const E = require("./lib/env.js");
+const { buildReport } = require("./lib/report.js");
 const { runPhase1 } = require("./lib/phase1.js");
 
 const deps = { app, core, imaging, fs, formats, types, os };
@@ -15,16 +17,15 @@ const lines = [];
 const log = (s) => { lines.push(s); $("out").value = lines.join("\n"); };
 const clear = () => { lines.length = 0; $("out").value = ""; };
 const msg = (s) => { $("msg").textContent = s; };
-const prog = (f) => { $("prog").value = Math.round((f || 0) * 100); };
+const prog = (f, m) => { $("prog").value = Math.round((f || 0) * 100); if (m) msg(m); };
 const radio = (id, d) => ($(id) && $(id).selected) || d;
 
-const state = { srcDoc: null, job: null, result: null, dup: null, saved: null, lastJobDir: null };
+const state = { srcDoc: null, snap: null, result: null, cfg: null, dup: null, saved: null, recheck: null };
 
 function setButtons() {
-  const has = !!state.dup;
-  $("btnCompare").disabled = !state.result || !state.result.compare_png;
-  $("btnRecheck").disabled = !has && !state.saved;
-  $("btnSave").disabled = !has;
+  $("btnCompare").disabled = !state.dup;
+  $("btnRecheck").disabled = !state.dup && !state.saved;
+  $("btnSave").disabled = !state.dup;
   $("btnReport").disabled = !state.result;
 }
 
@@ -51,31 +52,13 @@ async function busy(label, fn) {
   finally { $("btnAnalyze").disabled = false; $("btnClean").disabled = false; $("btnPhase1").disabled = false; setButtons(); }
 }
 
-async function dropOldJob() {
-  if (state.lastJobDir) { await B.makeIO(deps).removeFolder(state.lastJobDir); state.lastJobDir = null; }
-}
-
-// 이전에 보냈다가 남은 작업들(앞선 시도·창 닫기 등)을 지워 엔진이 쓸데없이 붙잡히지 않게 함
-async function clearStaleJobs() {
-  try {
-    const root = B.engineRoot(deps) + "/jobs";
-    const dir = await fs.getEntryWithUrl(B.toFileUrl(root));
-    const io = B.makeIO(deps);
-    for (const e of await dir.getEntries()) if (e.isFolder) await io.removeFolder(`${root}/${e.name}`);
-  } catch (e) { /* 폴더 없음 */ }
-}
-
-async function runEngine(doc, kind) {
-  const st = await B.engineStatus(deps);
-  if (!st.alive) throw new Error("클린업 엔진이 실행 중이 아닙니다 (마지막 신호 " + (st.age ? Math.round(st.age) + "초 전" : "없음") + "). 'PSD 클린업 엔진 설치.command'를 한 번 실행했는지 확인하세요.");
-  await dropOldJob();
-  await clearStaleJobs();
-  log(`레이어 픽셀 내보내는 중… (${doc.name})`);
-  const job = await B.exportJob(deps, doc, config(), kind, () => {});
-  state.lastJobDir = job.dir;
-  const result = await B.waitResult(deps, job, (f, m) => { prog(f); msg(m || ""); });
-  if (result.status !== "ok") throw new Error("엔진 처리 실패: " + result.error);
-  return { job, result };
+async function run(doc, kind, cfg) {
+  log(`레이어 픽셀 읽는 중… (${doc.name})`);
+  prog(0.01, "레이어 픽셀 읽는 중…");
+  const snap = await R.readDocument(deps, doc, cfg, () => {});
+  const result = await R.analyze(snap, kind, prog);
+  prog(1, "");
+  return { snap, result };
 }
 
 function showSummary(r, title) {
@@ -87,18 +70,22 @@ function showSummary(r, title) {
   (r.skipped_layers || []).forEach((x) => log(`  건너뜀: ${x.path} [${x.kind}] — ${x.reasons.join("; ")}`));
   const top = (r.unresolved || []).slice(0, 25);
   top.forEach((f) => log(`  · ${f.layer_name || "(합성)"} — ${f.type_label} ${f.bounds ? "@" + f.bounds.slice(0, 2).join(",") : ""} : ${f.proposed_action}`));
-  if ((r.unresolved || []).length > top.length) log(`  … 외 ${r.unresolved.length - top.length}건 (검수 보고서에 전체 목록)`);
+  if ((r.unresolved || []).length > top.length) log(`  … 외 ${r.unresolved.length - top.length}건 (⑥ 검수 보고서에 전체 목록)`);
+}
+
+async function closeDup() {
+  if (!state.dup) return;
+  try { await core.executeAsModal(async () => { await state.dup.closeWithoutSaving(); }, { commandName: "이전 복제본 닫기" }); } catch (e) { /* 이미 닫힘 */ }
+  state.dup = null;
 }
 
 $("btnEnv").addEventListener("click", () => busy("환경 확인 중", async () => {
   const chip = E.describeChip(os.arch());
   const mac = E.describeMacOS(os.platform(), os.release());
   const ps = E.describePhotoshop(uxp.host.version);
-  const st = await B.engineStatus(deps);
   $("env").textContent =
     `칩: ${chip.chip} · ${mac.name}${mac.note ? " (" + mac.note + ")" : ""} · ${ps.name} ${ps.ok ? "✅" : "❌ " + ps.note} · ` +
-    `클린업 엔진: ${st.alive ? "실행 중 ✅ v" + st.version + (st.state === "busy" ? " (다른 작업 처리 중)" : "")
-                         : "꺼짐 ❌ " + (st.age ? "(마지막 신호 " + Math.round(st.age) + "초 전) " : "") + "— 'PSD 클린업 엔진 설치.command'를 다시 실행하세요"}`;
+    `클린업 엔진: 플러그인 내장 ✅ (따로 설치할 것 없음)`;
   msg("");
 }));
 
@@ -106,8 +93,9 @@ $("btnAnalyze").addEventListener("click", () => busy("분석 중…", async () =
   clear();
   const doc = app.activeDocument;
   if (!doc) throw new Error("PSD 를 먼저 여세요");
-  const { job, result } = await runEngine(doc, "recheck");
-  state.result = result; state.job = job;
+  const cfg = config();
+  const { result } = await run(doc, "recheck", cfg);
+  state.result = result; state.cfg = cfg; state.reportDoc = doc; state.savedInfo = null; state.recheck = null;
   showSummary(result, `분석 결과 — ${doc.name}`);
   msg("분석 완료 (아무것도 수정하지 않았습니다)");
 }));
@@ -116,13 +104,14 @@ $("btnClean").addEventListener("click", () => busy("자동 클린업 중…", as
   clear();
   const doc = app.activeDocument;
   if (!doc) throw new Error("PSD 를 먼저 여세요");
-  if (state.dup) { try { await core.executeAsModal(async () => state.dup.closeWithoutSaving(), { commandName: "이전 복제본 닫기" }); } catch (e) { /* */ } state.dup = null; }
-  state.srcDoc = doc; state.saved = null;
-  const { job, result } = await runEngine(doc, "cleanup");
-  state.job = job; state.result = result;
+  await closeDup();
+  state.srcDoc = doc; state.saved = null; state.recheck = null;
+  const cfg = config();
+  const { snap, result } = await run(doc, "cleanup", cfg);
+  state.snap = snap; state.result = result; state.cfg = cfg; state.reportDoc = doc; state.savedInfo = null;
   showSummary(result, `클린업 계획 — ${doc.name}`);
   if (!result.patches.length) { msg("자동으로 고칠 확실한 오류가 없습니다"); return; }
-  const ap = await B.applyToDuplicate(deps, doc, job, result, log);
+  const ap = await R.applyToDuplicate(deps, doc, snap, result, log);
   if (ap.problems.length) {
     ap.problems.forEach((p) => log("  ❌ " + p));
     msg("적용 결과가 예상과 달라 모두 취소했습니다 (원본·복제본 변경 없음)");
@@ -133,43 +122,42 @@ $("btnClean").addEventListener("click", () => busy("자동 클린업 중…", as
   msg("복제본에 적용됨 — ③ 전후 비교 / ④ 재검사 / ⑤ 새 PSD로 저장");
 }));
 
-$("btnCompare").addEventListener("click", () => busy("전후 비교 열기", async () => {
-  const p = `${state.job.dir}/${state.result.compare_png}`;
-  await core.executeAsModal(async () => { await app.open(await fs.getEntryWithUrl(B.toFileUrl(p))); },
-                            { commandName: "전후 비교 이미지 열기" });
-  msg("전후 비교 이미지를 열었습니다 (왼쪽: 수정 전 / 가운데: 수정 후 / 오른쪽: 바뀐 픽셀 빨강). 원본·복제본 문서 탭을 번갈아 봐도 됩니다.");
+$("btnCompare").addEventListener("click", () => busy("전후 비교 문서 만드는 중…", async () => {
+  await R.makeCompareDoc(deps, state.srcDoc, state.dup, state.result, log);
+  const pts = state.result.changes || [];
+  pts.slice(0, 20).forEach(([x, y, p]) => log(`  바뀐 곳: x=${x}, y=${y} (${p})`));
+  if (pts.length > 20) log(`  … 외 ${pts.length - 20}곳`);
+  msg("'전후비교' 문서: '수정 후' 레이어 눈 아이콘을 껐다 켜며 비교하세요. 빨간 원 = 바뀐 곳. 이 문서는 저장되지 않습니다.");
 }));
 
 $("btnRecheck").addEventListener("click", () => busy("남은 오류 재검사 중…", async () => {
   const target = state.dup || app.activeDocument;
-  const keep = { job: state.job, result: state.result };
-  const { job, result } = await runEngine(target, "recheck");
+  const { result } = await run(target, "recheck", state.cfg || config());
   showSummary(result, `재검사 결과 — ${target.name}`);
   state.recheck = result;
-  // 저장·비교에는 클린업 작업 결과가 필요하므로 되돌림 (재검사 작업 폴더는 바로 정리)
-  await B.makeIO(deps).removeFolder(job.dir);
-  state.lastJobDir = keep.job ? keep.job.dir : null;
-  state.job = keep.job; state.result = keep.result;
   msg("재검사 완료");
 }));
 
 $("btnSave").addEventListener("click", () => busy("새 PSD로 저장·검증 중…", async () => {
-  const sv = await B.saveAndVerify(deps, state.srcDoc, state.dup, state.job, state.result, log);
+  const sv = await R.saveAndVerify(deps, state.srcDoc, state.dup, state.snap, state.result, log);
   state.dup = null;
+  state.savedInfo = sv;
   sv.checks.forEach((c) => log(`${c.ok ? "✅" : "❌"} ${c.name}${c.detail ? " — " + c.detail : ""}`));
   if (sv.passed) { state.saved = sv.outPath; log(`✅ 저장 완료: ${sv.outPath}`); msg("저장 및 검증 완료"); }
   else { log(`❌ 검증 실패 → 파일 이름을 ${sv.outPath} 로 바꿨습니다`); msg("검증 실패 — 결과를 캡처해서 보내 주세요"); }
 }));
 
 $("btnReport").addEventListener("click", () => busy("보고서 저장 중…", async () => {
-  const io = B.makeIO(deps);
-  const src = state.srcDoc || app.activeDocument;
-  const base = B.splitPath(state.saved || src.path || src.name);
-  const html = await io.readText(`${state.job.dir}/report.html`);
+  const src = state.reportDoc || app.activeDocument;
+  const html = buildReport({ docName: src.name, config: state.cfg, cleanup: state.result, recheck: state.recheck,
+                             saved: state.savedInfo, date: new Date().toLocaleString() });
+  const saved = state.reportDoc === state.srcDoc ? state.saved : null;
+  const base = R.splitPath(saved || src.path || src.name);
   let out;
-  if (state.saved || src.path) {
-    out = `${base.dir}/${base.base.replace(/_CLEAN$/, "")}_QA.html`;
-    await io.writeText(out, html);
+  if (saved || src.path) {
+    out = `${base.dir}/${base.base.replace(/_CLEAN(_\d+)?$/, "")}_QA.html`;
+    const f = await fs.createEntryWithUrl(R.toFileUrl(out), { overwrite: true });
+    await f.write(html, { format: formats.utf8 });
   } else {                                           // 저장 안 된 문서 → 위치를 물어봄
     const f = await fs.getFileForSaving(`${base.base}_QA.html`, { types: ["html"] });
     if (!f) { msg("취소했습니다"); return; }
@@ -177,7 +165,7 @@ $("btnReport").addEventListener("click", () => busy("보고서 저장 중…", a
     out = f.nativePath;
   }
   log(`✅ 검수 보고서 저장: ${out}`);
-  msg("보고서를 PSD 옆에 저장했습니다");
+  msg("보고서를 저장했습니다 (브라우저로 열어 보세요)");
 }));
 
 $("btnPhase1").addEventListener("click", () => busy("연동 진단 중…", async () => {

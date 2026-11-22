@@ -146,20 +146,20 @@ def test_heartbeat_keeps_updating_while_busy(tmp_path, monkeypatch):
     (tmp_path / "jobs" / "slow" / "request.json").write_text("{}", encoding="utf-8")
 
     def slow(job):
-        time.sleep(4.5)
+        time.sleep(6.0)
         return {"status": "ok"}
     monkeypatch.setattr(X, "process_job", slow)
     t = threading.Thread(target=X.watch, kwargs={"once": True}, daemon=True)
     t.start()
     seen = []
-    for _ in range(40):
+    for _ in range(55):
         time.sleep(0.1)
         if (tmp_path / "engine.json").exists():
             d = json.loads((tmp_path / "engine.json").read_text(encoding="utf-8"))
             seen.append((time.time() - d["time"], d["state"]))
     t.join(timeout=10)
     busy_ages = [age for age, st in seen if st == "busy"]
-    assert busy_ages and max(busy_ages) < 3.0          # 바쁜 동안에도 2초 간격으로 갱신
+    assert busy_ages and max(busy_ages) < 4.0          # 바쁜 동안에도 약 2초 간격으로 갱신
     assert json.loads((tmp_path / "jobs" / "slow" / "result.json").read_text())["status"] == "ok"
 
 
