@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -37,7 +38,9 @@ def crc32_hex(data: bytes | np.ndarray) -> str:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    tmp = path.with_name(".tmp_" + path.name)
+    # 임시 파일 이름을 프로세스·스레드마다 다르게: 생존 신호 스레드와 작업 스레드가 동시에 engine.json 을 쓰면
+    # 같은 임시 파일을 서로 옮겨 버려 FileNotFoundError 가 나고, 예전 버전에선 엔진 전체가 꺼졌다.
+    tmp = path.with_name(f".tmp_{os.getpid()}_{threading.get_ident()}_{path.name}")
     with open(tmp, "wb") as f:
         f.write(data)
         f.flush()
@@ -232,7 +235,10 @@ def handle_one(job: Path) -> None:
         return
     marker.write_text(str(os.getpid()))
     STATE.update(state="busy", job=job.name)
-    _heartbeat("busy", job.name)
+    try:
+        _heartbeat("busy", job.name)
+    except OSError:
+        pass
     try:
         res = process_job(job)
     except Exception as ex:
@@ -243,7 +249,10 @@ def handle_one(job: Path) -> None:
     except OSError:
         pass
     STATE.update(state="idle", job=None)
-    _heartbeat("idle")
+    try:
+        _heartbeat("idle")
+    except OSError:
+        pass
 
 
 def watch(poll: float = 0.5, once: bool = False) -> None:
@@ -258,7 +267,6 @@ def watch(poll: float = 0.5, once: bool = False) -> None:
     cleanup_old_jobs()
     recover_interrupted_jobs()
     # 살아 있음 신호: 큰 PSD 를 처리하는 동안에도 2초마다 갱신 (별도 스레드)
-    import threading
     stop = threading.Event()
 
     def beat():

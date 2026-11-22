@@ -94,18 +94,34 @@ cat > "$PLIST" <<PL
 </dict>
 </plist>
 PL
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
+DOMAIN="gui/$(id -u)"
+launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
+# bootout 은 비동기라 바로 bootstrap 하면 'Bootstrap failed: 5' 로 조용히 실패할 수 있음 → 완전히 내려갈 때까지 대기
+for i in $(seq 1 20); do launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break; sleep 0.5; done
 # 이전 버전 엔진이 남아 있으면 확실히 끄고, 쌓여 있던 이전 작업을 정리
 pkill -f "psd_cleanup watch" 2>/dev/null || true
 sleep 1
 rm -rf "${ROOT:?}/jobs" "${ROOT:?}/engine.json" "${ROOT:?}/engine.lock"
 mkdir -p "$ROOT/jobs"
-launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" || fail "백그라운드 엔진 등록 실패"
+launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true      # 예전에 'disabled' 로 표시된 경우 해제
+REG=0
+for i in 1 2 3 4 5; do
+  if launchctl bootstrap "$DOMAIN" "$PLIST" 2>"$ROOT/.launchctl.err"; then REG=1; break; fi
+  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 && { REG=1; break; }   # 이미 등록됨
+  sleep 1
+done
+if [ "$REG" = 0 ]; then
+  say "  (launchctl: $(cat "$ROOT/.launchctl.err" 2>/dev/null))"
+  fail "백그라운드 엔진 등록 실패 — 시스템 설정 → 일반 → 로그인 항목에서 'python' 백그라운드 허용을 켠 뒤 다시 실행하세요."
+fi
+rm -f "$ROOT/.launchctl.err"
+launchctl kickstart "$DOMAIN/$LABEL" 2>/dev/null || true
 
 say "엔진 응답 확인…"
 OK=0
 for i in $(seq 1 20); do
-  if [ -f "$ROOT/engine.json" ] && "$VPY" -c "import json,time,sys; d=json.load(open('$ROOT/engine.json')); sys.exit(0 if time.time()-d['time']<10 else 1)" 2>/dev/null; then OK=1; break; fi
+  # 새 생존 신호가 있고, 그 신호를 쓴 프로세스가 실제로 살아 있어야 성공
+  if [ -f "$ROOT/engine.json" ] && "$VPY" -c "import json,os,time,sys; d=json.load(open('$ROOT/engine.json')); os.kill(int(d['pid']),0); sys.exit(0 if time.time()-d['time']<10 else 1)" 2>/dev/null; then OK=1; break; fi
   sleep 1
 done
 [ "$OK" = 1 ] || fail "엔진이 응답하지 않습니다. 로그: $ROOT/engine.log"

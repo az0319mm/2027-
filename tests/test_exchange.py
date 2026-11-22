@@ -163,6 +163,28 @@ def test_heartbeat_keeps_updating_while_busy(tmp_path, monkeypatch):
     assert json.loads((tmp_path / "jobs" / "slow" / "result.json").read_text())["status"] == "ok"
 
 
+def test_concurrent_heartbeat_writes_do_not_collide(tmp_path, monkeypatch):
+    """실제 Mac 에서 발견: 생존 신호 스레드와 작업 스레드가 같은 임시 파일로 engine.json 을 써서 충돌 → 엔진 꺼짐."""
+    import psd_cleanup.exchange as X
+    monkeypatch.setattr(X, "ROOT", tmp_path)
+    errors = []
+
+    def spam():
+        for _ in range(300):
+            try:
+                X._heartbeat("busy", "j")
+            except Exception as ex:  # noqa: BLE001
+                errors.append(ex)
+    ts = [threading.Thread(target=spam) for _ in range(4)]
+    for th in ts:
+        th.start()
+    for th in ts:
+        th.join()
+    assert not errors
+    assert json.loads((tmp_path / "engine.json").read_text(encoding="utf-8"))["state"] == "busy"
+    assert not list(tmp_path.glob(".tmp_*"))
+
+
 def test_interrupted_job_gets_failed_result(tmp_path, monkeypatch):
     import psd_cleanup.exchange as X
     monkeypatch.setattr(X, "ROOT", tmp_path)
