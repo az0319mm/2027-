@@ -52,6 +52,7 @@ img{max-width:100%;border:1px solid var(--line)}
 <div class="row">도수 <input type="number" id="color_count" min="1" placeholder="예: 6"></div>
 <div class="row">허용 색상 <input type="text" id="colors" placeholder="#FFFFFF, #F4A7B9, #7A5A50"></div>
 <label><input type="checkbox" id="one_color"> 레이어 하나 = 분판 색 하나 구조</label>
+<label><input type="checkbox" id="fix_repeats"> 반복된 1픽셀도 고치기 (보고서에서 '의도적 반복'이 복사된 실수로 보일 때)</label>
 </fieldset>
 
 <fieldset id="interior" class="hidden"><legend>5. 인테리어 설정</legend>
@@ -90,6 +91,7 @@ function cfg() {
     if ($("color_count").value) c.expected_color_count = parseInt($("color_count").value, 10);
     c.allowed_colors = list($("colors").value);
     c.one_color_per_layer = $("one_color").checked;
+    c.fix_repeats = $("fix_repeats").checked;
   } else {
     c.interior_style = $("style").value;
     if ($("paper").value.trim()) c.paper_color = $("paper").value.trim();

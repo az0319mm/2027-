@@ -595,6 +595,10 @@ def diagonal_spikes_and_boundary_odd(rgba: np.ndarray, repeat_min: int, has_alph
                     thick = True
         if not thick:
             continue
+        # 가늘어지는 모양의 끝(첨단)은 보호: 5x5 안 같은 색이 9개 이하면 '뾰족한 끝'으로 보고 제외
+        y0, y1, x0, x1 = max(0, y - 2), min(H, y + 3), max(0, x - 2), min(W, x + 3)
+        if int((K[y0:y1, x0:x1] == k).sum()) <= 9:
+            continue
         kind = "edge_notch" if k == 0 or (has_alpha and (k & 255) == 0) else "edge_spur"
         out_idx.append((y, x, kind, o, ns))
     if not out_idx:
@@ -812,6 +816,12 @@ def line_profile_bumps(rgba: np.ndarray, has_alpha: bool, w: int = 7):
                 if _spread(wx[side], wh[side]) >= 0.999:
                     continue                       # 양옆이 직선이 아님 (곡선/복잡한 형태)
                 if abs(np.polyfit(wx[side], wh[side], 1)[0]) > 1.0:
+                    continue
+                # 진짜 톱니만: 가운데 칸 때문에 생기는 계단 간격이 양옆 계단 간격 집합에 없어야 함.
+                # (간격이 같은 값들 안에서 리듬만 바뀌는 것은 완만한 곡선의 정상 계단 → 제외)
+                side_steps = set(np.diff(wh[:w]).astype(int).tolist()) | set(np.diff(wh[w + 1:]).astype(int).tolist())
+                d1, d2 = int(wh[w] - wh[w - 1]), int(wh[w + 1] - wh[w])
+                if d1 in side_steps and d2 in side_steps:
                     continue
                 ok = []
                 for dd in (-1, 1):

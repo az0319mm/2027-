@@ -37,6 +37,7 @@ TYPE_LABELS = {
     "repeat_discontinuity": "리핏 연결부 불연속",
     "internal_seam": "캔버스 내부 타일 이음매 어긋남",
     "separation_mismatch": "분판 구성 불일치",
+    "separation_info": "분판 모드",
     "edge_foreign_speck": "외곽 이질 점(도장툴 흔적 의심)",
     "hard_edge": "외곽 계단(매끄럽지 않음)",
     "line_artifact": "1px 직선 자국",

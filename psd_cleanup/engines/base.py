@@ -75,7 +75,7 @@ class BaseEngine:
             else:
                 conf, act = UNCERTAIN, "보존, 사람이 확인 필요"
             fix = None
-            if conf == CERTAIN:
+            if conf in (CERTAIN, INTENTIONAL):   # 의도적 반복도 수정안은 계산(옵션 fix_repeats 용)
                 new = rgba[c.ys, c.xs].copy()
                 new[:, 3] = 0
                 fix = PixelFix(c.ys, c.xs, new)
@@ -91,14 +91,14 @@ class BaseEngine:
             if c.kind == "odd_pixel" and max(abs(a - b) for a, b in zip(c.old, c.new)) < min_diff:
                 continue
             ev = {"old": list(c.old), "new": list(c.new), "same_neighborhood_repeats": c.repeat_count}
-            if c.intentional:
-                conf, act = INTENTIONAL, "보존 (같은 1픽셀 패턴 반복 → 5쪽 통과 사례와 같은 의도적 반복)"
-            elif certain_allowed:
-                conf, act = CERTAIN, f"주변 8픽셀과 같은 색 {to_hex(c.new)} 으로 채움"
-            else:
+            if not certain_allowed:      # 연속톤/질감 보호가 반복 판정보다 먼저
                 conf, act = UNCERTAIN, "보존 (질감 표현일 수 있음)"
+            elif c.intentional:
+                conf, act = INTENTIONAL, "보존 (같은 1픽셀 패턴 반복 → 5쪽 통과 사례와 같은 의도적 반복)"
+            else:
+                conf, act = CERTAIN, f"주변 8픽셀과 같은 색 {to_hex(c.new)} 으로 채움"
             fix = None
-            if conf == CERTAIN:
+            if conf in (CERTAIN, INTENTIONAL):   # 의도적 반복도 수정안은 계산(옵션 fix_repeats 용)
                 fix = PixelFix(np.array([c.y]), np.array([c.x]), np.array([c.new], dtype=np.uint8))
             out.append(self._f(layer, type=c.kind, confidence=conf, proposed_action=act, evidence=ev,
                                bounds=self._bounds(layer, c.x, c.y, c.x + 1, c.y + 1),

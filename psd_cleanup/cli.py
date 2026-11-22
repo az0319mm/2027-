@@ -37,6 +37,10 @@ def _cfg_from_args(a) -> ProjectConfig:
         cfg.approved_texture_layers += a.texture_layer
     if a.no_fix:
         cfg.auto_fix = False
+    if getattr(a, "fix_repeats", False):
+        cfg.fix_repeats = True
+    if getattr(a, "one_color_per_layer", False):
+        cfg.one_color_per_layer = True
     cfg.validate()
     return cfg
 
@@ -60,6 +64,9 @@ def main(argv=None) -> int:
         p.add_argument("--recursive", action="store_true")
         p.add_argument("--overwrite-outputs", action="store_true", help="기존 결과 파일만 덮어쓰기 (원본은 절대 아님)")
         p.add_argument("--no-fix", action="store_true", help="검수만 (자동 수정 없음)")
+        p.add_argument("--fix-repeats", action="store_true",
+                       help="어패럴: 모티브 복제본마다 반복된 1픽셀도 실수로 보고 수정 (보고서 확인 후 사용)")
+        p.add_argument("--one-color-per-layer", action="store_true", help="어패럴: 레이어 하나 = 분판 색 하나 구조")
         p.add_argument("--save-config", help="현재 설정을 JSON으로 저장")
     s = sub.add_parser("serve")
     s.add_argument("--port", type=int, default=8765)

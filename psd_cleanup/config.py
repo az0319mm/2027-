@@ -42,6 +42,7 @@ class ProjectConfig:
     expected_color_count: int | None = None      # 도수
     allowed_colors: list[str] = field(default_factory=list)  # "#RRGGBB"
     one_color_per_layer: bool = False             # 레이어=분판 구조일 때만 True
+    separation_mode: str = "auto"                 # auto: 분판 구조(레이어당 1색·겹침 없음)를 감지하면 분판 단위로 검사/수정, off: 끔
 
     # --- 인테리어 ---
     interior_style: str = "digital"
@@ -55,6 +56,7 @@ class ProjectConfig:
     # --- 동작 ---
     auto_fix: bool = True          # False 이면 검수만 (Phase 1 모드)
     fix_types: list[str] | None = None  # None = 엔진 기본값. 특정 유형만 수정하고 싶을 때
+    fix_repeats: bool = False      # 어패럴: 복제본마다 똑같이 반복된 1픽셀도 '복사된 실수'로 보고 수정 (사람이 확인 후 켬)
     repeat_min: int = 3            # 같은 형태가 이 횟수 이상 반복되면 '의도적 반복'으로 간주 (5쪽)
     max_layer_change_ratio: float = 0.005  # 한 레이어에서 이 비율 이상 바뀌면 해당 레이어 수정 전체 취소
 
@@ -63,6 +65,8 @@ class ProjectConfig:
             raise ValueError(f"work_type must be one of {WORK_TYPES}")
         if self.repeat not in REPEAT_MODES:
             raise ValueError(f"repeat must be one of {REPEAT_MODES}")
+        if self.separation_mode not in ("auto", "off"):
+            raise ValueError("separation_mode must be 'auto' or 'off'")
         if self.interior_style not in INTERIOR_STYLES:
             raise ValueError(f"interior_style must be one of {INTERIOR_STYLES}")
         for c in self.allowed_colors + ([self.paper_color] if self.paper_color else []):

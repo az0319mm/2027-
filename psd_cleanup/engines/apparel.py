@@ -52,16 +52,16 @@ class ApparelEngine(BaseEngine):
                 ev = {"direction_to_body": c.direction, "old": list(c.old), "new": list(c.new),
                       "same_neighborhood_repeats": c.repeat_count, "straight_edge_len": list(c.plateau),
                       "convex_apex": c.apex}
-                if c.intentional:
-                    conf, act = INTENTIONAL, "보존 (같은 모양이 반복 → 의도적 반복)"
-                elif c.apex:
+                if c.apex:          # 모양 보호가 반복 판정보다 먼저 (fix_repeats 옵션으로도 바뀌지 않게)
                     conf, act = UNCERTAIN, "보고만 (곡선 정점의 1px — 정상적인 픽셀 계단일 수 있음)"
                 elif not flat:
                     conf, act = UNCERTAIN, "보고만 (연속톤 레이어)"
+                elif c.intentional:
+                    conf, act = INTENTIONAL, "보존 (같은 모양이 반복 → 의도적 반복)"
                 else:
                     conf, act = CERTAIN, ("투명 처리" if c.new[3] == 0 else f"바깥 색 {to_hex(c.new)} 로 채움")
                 fix = PixelFix(np.array([c.y]), np.array([c.x]), np.array([c.new], dtype=np.uint8)) \
-                    if conf == CERTAIN else None
+                    if conf in (CERTAIN, INTENTIONAL) else None
                 out.append(self._f(layer, type=c.kind, confidence=conf, proposed_action=act, evidence=ev,
                                    bounds=self._bounds(layer, c.x, c.y, c.x + 1, c.y + 1),
                                    pdf_ref="2쪽 모티프 회전으로 깨진 경계", fix=fix))
@@ -72,14 +72,14 @@ class ApparelEngine(BaseEngine):
                 ev = {"old": list(c.old), "new": list(c.new), "same_color_neighbors": c.same_neighbors,
                       "same_neighborhood_repeats": c.repeat_count,
                       "pattern": "boundary_odd_pixel" if c.kind == "odd_pixel" else "diagonal_spike"}
-                if c.intentional:
-                    conf, act = INTENTIONAL, "보존 (같은 모양이 반복 → 의도적 반복)"
-                elif not flat:
+                if not flat:
                     conf, act = UNCERTAIN, "보고만 (연속톤 레이어)"
+                elif c.intentional:
+                    conf, act = INTENTIONAL, "보존 (같은 모양이 반복 → 의도적 반복)"
                 else:
                     conf, act = CERTAIN, ("투명 처리" if c.new[3] == 0 else f"주변 색 {to_hex(c.new)} 로 채움")
                 fix = PixelFix(np.array([c.y]), np.array([c.x]), np.array([c.new], dtype=np.uint8)) \
-                    if conf == CERTAIN else None
+                    if conf in (CERTAIN, INTENTIONAL) else None
                 ref = "4쪽 경계 위 1픽셀 잘못 칠함" if c.kind == "odd_pixel" else "2쪽 모티프 회전으로 깨진 경계(대각선)"
                 out.append(self._f(layer, type=c.kind, confidence=conf, proposed_action=act, evidence=ev,
                                    bounds=self._bounds(layer, c.x, c.y, c.x + 1, c.y + 1), pdf_ref=ref, fix=fix))
@@ -95,19 +95,30 @@ class ApparelEngine(BaseEngine):
                     newc = A.key_to_rgba(new)
                     ev = {"old": list(A.key_to_rgba(old)), "new": list(newc), "pattern": "line_profile",
                           "same_neighborhood_repeats": n_}
-                    if r_:
-                        conf, act = INTENTIONAL, "보존 (같은 모양이 반복 → 의도적 반복)"
-                    elif not flat:
+                    if not flat:
                         conf, act = UNCERTAIN, "보고만 (연속톤 레이어)"
+                    elif r_:
+                        conf, act = INTENTIONAL, "보존 (같은 모양이 반복 → 의도적 반복)"
                     else:
                         conf, act = CERTAIN, ("투명 처리" if newc[3] == 0 else f"경계 직선에 맞춰 {to_hex(newc)} 로")
                     fix = PixelFix(np.array([y]), np.array([x]), np.array([newc], dtype=np.uint8)) \
-                        if conf == CERTAIN else None
+                        if conf in (CERTAIN, INTENTIONAL) else None
                     out.append(self._f(layer, type=kind, confidence=conf, proposed_action=act, evidence=ev,
                                        bounds=self._bounds(layer, x, y, x + 1, y + 1),
                                        pdf_ref="2쪽 모티프 회전으로 깨진 경계(대각선)", fix=fix))
         if self.cfg.repeat != "none":
             out += self.internal_seam_findings(layer, rgba)
+        if self.cfg.fix_repeats:
+            # 사용자 선택: '모티브 복제본마다 똑같이 반복된 1픽셀'도 복사된 실수로 보고 수정
+            for f in out:
+                if (f.confidence == INTENTIONAL and f.fix is not None and not f.skip_reason
+                        and f.type in ("odd_pixel", "pinhole", "edge_spur", "edge_notch")):   # 반복 점무늬(점선 등)는 제외
+                    f.confidence = CERTAIN
+                    f.proposed_action = "반복된 1픽셀도 결함으로 수정 (fix_repeats 옵션) — " + f.proposed_action
+                    f.evidence["repeat_override"] = True
+        for f in out:
+            if f.confidence != CERTAIN:
+                f.fix = None if f.confidence != INTENTIONAL else f.fix
         self.density_guard(layer, out, rgba.shape[:2])
         # 1쪽 경계 여러 색 / 6쪽 분판
         out += self._palette_checks(layer, rgba)

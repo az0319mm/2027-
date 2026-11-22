@@ -662,3 +662,59 @@ def test_stripes_not_reported_as_internal_seam(tmp_path):
     src = build_psd(tmp_path / "st.psd", (120, 90), [dict(name="stripe", rgba=m, trim=False)])
     r = _run(src, tmp_path, work_type="interior")
     assert not [f for f in r.qa["findings"] if f["type"] in ("internal_seam", "line_artifact")]
+
+
+
+def test_tapering_tip_is_not_treated_as_spike(tmp_path):
+    """실제 분판 PSD 에서 발견: 10→9→7→4→2→1 로 좁아지는 뾰족한 끝 1px 을 톱니로 오인하던 문제 (첨단 보호)."""
+    m = rect(blank(H, W), 0, H, 0, W, CREAM)
+    widths = [10, 9, 7, 4, 2, 1]
+    for i, w in enumerate(widths):
+        x0 = 50 - (w - 1) // 2 if w > 2 else 50
+        m[30 + i, x0:x0 + w] = (*BROWN, 255)
+    src = build_psd(tmp_path / "tip.psd", (W, H), [dict(name="L", rgba=m)])
+    r = _run(src, tmp_path, work_type="apparel")
+    assert r.summary["changed_pixels_total"] == 0
+
+
+def test_separation_mode_moves_pixels_between_layers_without_holes(tmp_path):
+    """실제 분판 PSD 에서 발견: 레이어를 따로 고치면 구멍/겹침이 생기던 문제 → 분판 모드."""
+    base = np.zeros((H, W), np.int8)               # 0 = CREAM 분판, 1 = PINK 분판
+    base[10:50, 10:60] = 1
+    base[30, 60] = 1                               # 곧은 경계 1px 돌출 (PINK → CREAM 분판으로 옮겨야 함)
+    base[70, 100] = 1                              # 고립 점
+    layers = []
+    for k, col in ((0, CREAM), (1, PINK)):
+        a = blank(H, W)
+        a[base == k] = (*col, 255)
+        layers.append(dict(name=["Ivory", "Pink"][k], rgba=a))
+    src = build_psd(tmp_path / "sep.psd", (W, H), layers)
+    r = _run(src, tmp_path, work_type="apparel")
+    assert r.summary["separation_mode"] is True
+    v = r.qa["verification"]["checks"]
+    assert v["separation_integrity"] is True and v["separation_holes_before_after"] == "0 -> 0"
+    d = PSDDocument(r.outputs["clean_psd"])
+    ivory, pink = _layer_canvas(d, "Ivory"), _layer_canvas(d, "Pink")
+    for y, x in ((30, 60), (70, 100)):
+        assert pink[y, x, 3] == 0 and ivory[y, x, 3] == 255 and tuple(ivory[y, x, :3]) == CREAM
+    assert r.summary["changed_pixels_total"] == 2
+
+
+
+def test_fix_repeats_option_fixes_copied_pixels_but_keeps_dot_patterns(tmp_path):
+    """실제 분판 PSD 에서 발견: 모티브 복제본마다 똑같이 복사된 1px 실수. 사용자가 옵션을 켜면 고침.
+    단, 반복 점무늬(점선)와 밀집 영역은 여전히 보존."""
+    m = blank(H, W)
+    for cx in (15, 45, 75, 105):
+        disk(m, 40, cx, 10, PINK)
+        m[36, cx - 3] = (255, 255, 255, 255)        # 복제본마다 같은 1px
+    for x in range(10, 110, 6):                     # 점선
+        m[80, x] = (*BROWN, 255)
+    src = build_psd(tmp_path / "rep.psd", (W, H), [dict(name="dots", rgba=m)])
+    r0 = run_file(src, ProjectConfig(work_type="apparel"), tmp_path / "a")
+    assert r0.summary["changed_pixels_total"] == 0
+    r1 = run_file(src, ProjectConfig(work_type="apparel", fix_repeats=True), tmp_path / "b")
+    out = _layer_canvas(PSDDocument(r1.outputs["clean_psd"]), "dots")
+    assert all(tuple(out[36, cx - 3, :3]) == PINK for cx in (15, 45, 75, 105))
+    assert all(out[80, x, 3] == 255 for x in range(10, 110, 6))
+    assert r1.summary["changed_pixels_total"] == 4

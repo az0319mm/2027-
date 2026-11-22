@@ -15,7 +15,7 @@ import numpy as np
 
 from . import __version__
 from . import repeat as R
-from .config import ProjectConfig, parse_hex
+from .config import ProjectConfig, parse_hex, to_hex
 from .engines import get_engine
 from .findings import CERTAIN, INFO, INTENTIONAL, UNCERTAIN, UNSUPPORTED, Finding
 from .psd_io import PSDDocument, sha256_file, write_patched_psd
@@ -93,6 +93,23 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
                                 proposed_action="픽셀 분석/수정 건너뜀, 구조 정보만 보고",
                                 evidence={"reasons": doc.doc_info.unsupported_reasons}))
 
+    # 픽셀 레이어 읽기 (한 번만)
+    cache: dict[int, np.ndarray] = {}
+    if doc.doc_info.pixel_edit_supported:
+        for layer in doc.layers:
+            if layer.kind == "pixel":
+                rgba0 = doc.read_rgba(layer.index)
+                if rgba0 is not None:
+                    cache[layer.index] = rgba0
+
+    # 분판 구조 감지 (어패럴)
+    sep = None
+    sep_reason = "어패럴이 아님" if engine.name != "apparel" else "설정에서 끔"
+    if engine.name == "apparel" and cfg.separation_mode == "auto" and cache:
+        from .separation import detect_separation
+        sep, sep_reason = detect_separation(doc, cache, W, H)
+    sep_slots = set(sep.slots) if sep else set()
+
     n_layers = max(1, len(doc.layers))
     for i, layer in enumerate(doc.layers):
         check_cancel()
@@ -104,12 +121,16 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
                                       proposed_action="검사·수정 제외 (원본 그대로 유지)",
                                       evidence={"kind": layer.kind}, bounds=tuple(layer.bbox)))
             continue
-        rgba = doc.read_rgba(layer.index) if doc.doc_info.pixel_edit_supported else None
+        rgba = cache.get(layer.index)
         if rgba is None:
             findings += engine.hygiene(layer, None)
             continue
         approved = _match_any(cfg.approved_texture_layers, layer.name, layer.path)
-        lf = engine.analyze_layer(layer, rgba, approved_texture=approved)
+        if layer.index in sep_slots:
+            # 분판 레이어: 픽셀 검사·수정은 분판 전체(색 지도)에서 한 번에 → 여기서는 구조 점검만
+            lf = engine.hygiene(layer, rgba)
+        else:
+            lf = engine.analyze_layer(layer, rgba, approved_texture=approved)
         lf += R.seam_findings(rgba, layer.bbox[0], layer.bbox[1], W, H, cfg.repeat, engine.name, layer)
         seams = [f.bounds for f in lf if f.type in ("internal_seam", "repeat_discontinuity") and f.bounds]
         if seams:   # 리핏 이음매 위 픽셀은 리핏을 먼저 바로잡아야 함 → 그 근처 자동 수정 보류
@@ -133,6 +154,40 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         findings += lf
         layer_rgba[layer.index] = rgba
         analyzed_layers.append(layer.index)
+
+    VIRTUAL = -100
+    vlayer = None
+    if sep is not None:
+        check_cancel()
+        prog(0.6, "분판 전체(색 지도) 검사")
+        from .psd_io import LayerInfo
+        vlayer = LayerInfo(index=VIRTUAL, layer_id=None, name="[분판 합성]", path="[분판 합성]", kind="pixel",
+                           visible=True, effective_visible=True, opacity=255, fill_opacity=255, blend_mode="NORMAL",
+                           bbox=(0, 0, W, H), clipping=False, has_mask=False, has_vector_mask=False,
+                           has_effects=False, locks={}, has_alpha_channel=sep.holes > 0,
+                           channel_ids=[-1, 0, 1, 2], editable=True)
+        vrgba = sep.virtual_rgba()
+        vf = [f for f in engine.analyze_layer(vlayer, vrgba)
+              if f.type not in ("layer_hygiene", "color_count", "layer_multi_color", "semi_alpha_edge")]
+        seams = [f.bounds for f in findings if f.type in ("internal_seam", "repeat_discontinuity") and f.bounds]
+        for f in vf:
+            if f.confidence != CERTAIN:
+                continue
+            if f.bounds and any(f.bounds[0] < b[2] + 2 and b[0] - 2 < f.bounds[2] and
+                                f.bounds[1] < b[3] + 2 and b[1] - 2 < f.bounds[3] for b in seams):
+                f.confidence, f.fix = UNCERTAIN, None
+                f.proposed_action = "보고만 (리핏 이음매 위 — 리핏을 먼저 맞춘 뒤 다시 검사)"
+            elif f.bounds and any(_intersects(f.bounds, r) for r in cfg.protected_regions):
+                f.confidence, f.skip_reason = INTENTIONAL, "보호 영역(프로젝트 설정)"
+        findings.append(Finding(type="separation_info", engine=engine.name, scope="document", confidence=INFO,
+                                proposed_action="분판 모드: 분판 전체를 하나의 색 지도로 검사하고, 1픽셀 수정은 "
+                                                "원래 분판 레이어에서 빼서 새 색의 분판 레이어로 옮김 (구멍·겹침 생성 금지)",
+                                evidence={"layers": sep.names, "colors": [to_hex(c) for c in sep.colors],
+                                          "uncovered_pixels": sep.holes, "overlaps": sep.overlaps}))
+        findings += vf
+    elif engine.name == "apparel":
+        findings.append(Finding(type="separation_info", engine=engine.name, scope="document", confidence=INFO,
+                                proposed_action="분판 모드 아님 → 레이어별 검사", evidence={"reason": sep_reason}))
 
     if hasattr(engine, "analyze_separation") and cfg.one_color_per_layer:
         lc = {}
@@ -177,6 +232,9 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
                 by_layer.setdefault(f.layer_index, []).append(f)
 
     palette = {tuple(parse_hex(c)) for c in cfg.allowed_colors}
+    vfixes = by_layer.pop(VIRTUAL, [])
+    if sep is not None and vfixes:
+        _apply_separation_fixes(doc, sep, cache, vfixes, cfg, W, H, patches, expected_new)
     for idx, fl in by_layer.items():
         layer = doc.layer_by_index(idx)
         orig = layer_rgba[idx]
@@ -220,15 +278,7 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
             f.changed_pixel_count = int(changed[fx.ys, fx.xs].sum())
         if n_changed == 0:
             continue
-        chmap = {}
-        ids = layer.channel_ids
-        color_ids = [0, 1, 2] if doc.doc_info.color_mode == 3 else [0]
-        for ci, cid in enumerate(color_ids):
-            src_c = ci if doc.doc_info.color_mode == 3 else 0
-            if cid in ids and not np.array_equal(new[..., src_c], orig[..., src_c]):
-                chmap[cid] = new[..., src_c]
-        if -1 in ids and not np.array_equal(new[..., 3], orig[..., 3]):
-            chmap[-1] = new[..., 3]
+        chmap = _channel_patch(doc, layer, orig, new)
         if chmap:
             patches[idx] = chmap
             expected_new[idx] = new
@@ -248,7 +298,8 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
 
     prog(0.86, "저장 결과 재검증")
     from .verify import verify_output
-    verification = verify_output(src, sha_before, paths["clean_psd"], doc, patches, expected_new)
+    verification = verify_output(src, sha_before, paths["clean_psd"], doc, patches, expected_new,
+                                 separation_slots=sep.slots if sep else None)
 
     # ----------------------------------------------------------- 보고서
     prog(0.92, "보고서 생성")
@@ -300,6 +351,7 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         "applied_fixes": sum(1 for f in findings if f.applied),
         "changed_pixels_total": int(sum(f.changed_pixel_count for f in findings)),
         "patched_layers": [doc.layer_by_index(i).path for i in sorted(patches)],
+        "separation_mode": bool(sep), "separation_reason": sep_reason,
         "verification_passed": verification["passed"],
         "elapsed_sec": round(time.time() - t0, 2),
     }
@@ -357,3 +409,85 @@ def run_batch(inputs: list[str | Path], cfg: ProjectConfig, out_dir: str | Path 
             results.append(RunResult(str(f), status="failed", error=f"{type(e).__name__}: {e}",
                                      summary={"traceback": traceback.format_exc(limit=5)}))
     return results
+
+
+def _channel_patch(doc, layer, orig: np.ndarray, new: np.ndarray) -> dict[int, np.ndarray]:
+    chmap = {}
+    ids = layer.channel_ids
+    color_ids = [0, 1, 2] if doc.doc_info.color_mode == 3 else [0]
+    for ci, cid in enumerate(color_ids):
+        src_c = ci if doc.doc_info.color_mode == 3 else 0
+        if cid in ids and not np.array_equal(new[..., src_c], orig[..., src_c]):
+            chmap[cid] = new[..., src_c]
+    if -1 in ids and not np.array_equal(new[..., 3], orig[..., 3]):
+        chmap[-1] = new[..., 3]
+    return chmap
+
+
+def _apply_separation_fixes(doc, sep, cache, vfixes, cfg, W, H, patches, expected_new) -> None:
+    """분판 색 지도에서 확정된 1픽셀 수정 → '원래 분판에서 빼고 새 색 분판에 넣기'."""
+    label = sep.label.copy()
+    touched = np.zeros((H, W), bool)
+    moves: list[tuple[Finding, list]] = []
+    for f in vfixes:
+        fx = f.fix
+        if touched[fx.ys, fx.xs].any():
+            f.skip_reason = "다른 수정과 픽셀 충돌 → 건너뜀"
+            continue
+        mv, why = [], None
+        for y, x, nv in zip(fx.ys, fx.xs, fx.new):
+            old_k = int(label[y, x])
+            new_k = -1 if nv[3] == 0 else sep.slot_of_color(nv)
+            if new_k is None:
+                why = "새 색이 어느 분판 레이어 색과도 같지 않음"
+                break
+            if new_k == -1 and sep.holes == 0:
+                why = "분판이 캔버스를 빈틈없이 채우는 파일에서 구멍을 만들 수 없음"
+                break
+            for k in (old_k, new_k):
+                if k >= 0:
+                    l = doc.layer_by_index(sep.slots[k])
+                    if not (l.bbox[0] <= x < l.bbox[2] and l.bbox[1] <= y < l.bbox[3]):
+                        why = f"대상 분판 레이어({l.path}) 경계 밖 픽셀 — 레이어 크기는 바꾸지 않음"
+                if k >= 0 and _match_any(cfg.protected_layers, doc.layer_by_index(sep.slots[k]).name,
+                                         doc.layer_by_index(sep.slots[k]).path):
+                    why = "보호 레이어(프로젝트 설정)와 관련된 픽셀"
+            if why:
+                break
+            mv.append((int(y), int(x), old_k, new_k))
+        if why:
+            f.skip_reason = why
+            continue
+        for y, x, o, n in mv:
+            label[y, x] = n
+            touched[y, x] = True
+        moves.append((f, mv))
+    n_changed = int((label != sep.label).sum())
+    limit = max(64, int(cfg.max_layer_change_ratio * W * H))
+    if n_changed > limit:
+        for f, _ in moves:
+            f.skip_reason = f"분판 변경량 {n_changed}px 가 안전 한도 {limit}px 초과 → 분판 수정 전부 취소"
+        return
+    news = {idx: cache[idx].copy() for idx in sep.slots}
+    for f, mv in moves:
+        f.applied = True
+        f.changed_pixel_count = len(mv)
+        tr = []
+        for y, x, o, n in mv:
+            if o >= 0:
+                l = doc.layer_by_index(sep.slots[o])
+                news[l.index][y - l.bbox[1], x - l.bbox[0], 3] = 0
+            if n >= 0:
+                l = doc.layer_by_index(sep.slots[n])
+                news[l.index][y - l.bbox[1], x - l.bbox[0]] = (*sep.colors[n], 255)
+            tr.append([sep.names[o] if o >= 0 else "(없음)", sep.names[n] if n >= 0 else "(없음)"])
+        f.evidence["moved_from_to"] = tr[:5]
+    for idx in sep.slots:
+        orig, new = cache[idx], news[idx]
+        if np.array_equal(orig, new):
+            continue
+        chmap = _channel_patch(doc, doc.layer_by_index(idx), orig, new)
+        if chmap:
+            patches[idx] = chmap
+            expected_new[idx] = new
+

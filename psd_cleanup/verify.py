@@ -27,7 +27,8 @@ def _bytes_of(element) -> bytes:
 
 
 def verify_output(src: Path, sha_before: str, out: Path, doc: PSDDocument,
-                  patches: dict[int, dict[int, np.ndarray]], expected_new: dict[int, np.ndarray]) -> dict:
+                  patches: dict[int, dict[int, np.ndarray]], expected_new: dict[int, np.ndarray],
+                  separation_slots: list[int] | None = None) -> dict:
     failures: list[str] = []
     warnings: list[str] = []
     checks: dict[str, bool] = {}
@@ -109,6 +110,19 @@ def verify_output(src: Path, sha_before: str, out: Path, doc: PSDDocument,
                     px_ok = False
                     failures.append(f"레이어 [{i}] 채널 {cid} 이(가) 의도치 않게 변경")
     checks["pixel_invariance"] = px_ok
+
+    if separation_slots:
+        # 분판 무결성: 구멍(어느 분판에도 없는 픽셀)·겹침 수가 원본과 같아야 함
+        from .separation import coverage
+        W, H = doc.doc_info.width, doc.doc_info.height
+        c0 = coverage(doc, {i: doc.read_rgba(i) for i in separation_slots}, separation_slots, W, H)
+        c1 = coverage(new, {i: new.read_rgba(i) for i in separation_slots}, separation_slots, W, H)
+        h0, h1, o0, o1 = int((c0 == 0).sum()), int((c1 == 0).sum()), int((c0 > 1).sum()), int((c1 > 1).sum())
+        checks["separation_holes_before_after"] = f"{h0} -> {h1}"  # type: ignore[assignment]
+        checks["separation_overlaps_before_after"] = f"{o0} -> {o1}"  # type: ignore[assignment]
+        if h0 != h1 or o0 != o1:
+            failures.append(f"분판 구멍/겹침 변화: 구멍 {h0}->{h1}, 겹침 {o0}->{o1}")
+        checks["separation_integrity"] = h0 == h1 and o0 == o1
 
     m0, m1 = doc.merged_rgb(), new.merged_rgb()
     if m0 is not None and m1 is not None:
