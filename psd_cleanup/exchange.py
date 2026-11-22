@@ -272,9 +272,18 @@ def watch(poll: float = 0.5, once: bool = False) -> None:
     print(f"PSD 클린업 엔진 v{__version__} 감시 중: {ROOT / 'jobs'}", flush=True)
     try:
         while True:
-            for job in sorted((ROOT / "jobs").iterdir()):
+            try:
+                jobs = sorted((ROOT / "jobs").iterdir())
+            except OSError:
+                (ROOT / "jobs").mkdir(parents=True, exist_ok=True)
+                jobs = []
+            for job in jobs:
                 if job.is_dir() and not job.name.startswith("."):     # '.' 으로 시작 = 플러그인이 아직 쓰는 중
-                    handle_one(job)
+                    try:
+                        handle_one(job)
+                    except Exception as ex:                          # 플러그인이 작업 폴더를 지운 경우 등 → 엔진은 계속
+                        print(f"작업 처리 중 오류(무시하고 계속): {job.name}: {ex}", flush=True)
+                        STATE.update(state="idle", job=None)
             if once:
                 return
             time.sleep(poll)

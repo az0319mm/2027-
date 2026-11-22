@@ -95,6 +95,11 @@ cat > "$PLIST" <<PL
 </plist>
 PL
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || launchctl unload "$PLIST" 2>/dev/null || true
+# 이전 버전 엔진이 남아 있으면 확실히 끄고, 쌓여 있던 이전 작업을 정리
+pkill -f "psd_cleanup watch" 2>/dev/null || true
+sleep 1
+rm -rf "${ROOT:?}/jobs" "${ROOT:?}/engine.json" "${ROOT:?}/engine.lock"
+mkdir -p "$ROOT/jobs"
 launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" || fail "백그라운드 엔진 등록 실패"
 
 say "엔진 응답 확인…"

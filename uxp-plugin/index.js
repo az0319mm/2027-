@@ -55,10 +55,21 @@ async function dropOldJob() {
   if (state.lastJobDir) { await B.makeIO(deps).removeFolder(state.lastJobDir); state.lastJobDir = null; }
 }
 
+// 이전에 보냈다가 남은 작업들(앞선 시도·창 닫기 등)을 지워 엔진이 쓸데없이 붙잡히지 않게 함
+async function clearStaleJobs() {
+  try {
+    const root = B.engineRoot(deps) + "/jobs";
+    const dir = await fs.getEntryWithUrl(B.toFileUrl(root));
+    const io = B.makeIO(deps);
+    for (const e of await dir.getEntries()) if (e.isFolder) await io.removeFolder(`${root}/${e.name}`);
+  } catch (e) { /* 폴더 없음 */ }
+}
+
 async function runEngine(doc, kind) {
   const st = await B.engineStatus(deps);
   if (!st.alive) throw new Error("클린업 엔진이 실행 중이 아닙니다 (마지막 신호 " + (st.age ? Math.round(st.age) + "초 전" : "없음") + "). 'PSD 클린업 엔진 설치.command'를 한 번 실행했는지 확인하세요.");
   await dropOldJob();
+  await clearStaleJobs();
   log(`레이어 픽셀 내보내는 중… (${doc.name})`);
   const job = await B.exportJob(deps, doc, config(), kind, () => {});
   state.lastJobDir = job.dir;
@@ -86,7 +97,8 @@ $("btnEnv").addEventListener("click", () => busy("환경 확인 중", async () =
   const st = await B.engineStatus(deps);
   $("env").textContent =
     `칩: ${chip.chip} · ${mac.name}${mac.note ? " (" + mac.note + ")" : ""} · ${ps.name} ${ps.ok ? "✅" : "❌ " + ps.note} · ` +
-    `클린업 엔진: ${st.alive ? "실행 중 ✅ v" + st.version : "꺼짐 ❌ (엔진 설치 파일을 실행하세요)"}`;
+    `클린업 엔진: ${st.alive ? "실행 중 ✅ v" + st.version + (st.state === "busy" ? " (다른 작업 처리 중)" : "")
+                         : "꺼짐 ❌ " + (st.age ? "(마지막 신호 " + Math.round(st.age) + "초 전) " : "") + "— 'PSD 클린업 엔진 설치.command'를 다시 실행하세요"}`;
   msg("");
 }));
 
