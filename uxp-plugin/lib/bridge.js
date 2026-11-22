@@ -227,6 +227,19 @@ async function applyToDuplicate(deps, doc, job, result, log) {
       say(`적용: ${p.path} (${p.changed_pixels}px)`);
     }
     // 즉시 재확인: 수정한 레이어는 엔진이 계산한 결과와, 나머지는 원본과 같아야 함
+    // 다르면 실제로 읽힌 픽셀을 작업 폴더에 남겨 원인을 확인할 수 있게 함 (apply_check.json, verify_<order>.raw)
+    const checks = [];
+    const saveCheck = async (l, got, expHash, expBounds) => {
+      const c = { order: l.order, path: l.path, expected_hash: expHash, expected_bounds: expBounds,
+                  got_hash: got ? layerHash(got.data, got.components) : null, got_bounds: got ? got.bounds : null,
+                  got_components: got ? got.components : null, got_width: got ? got.width : null,
+                  got_height: got ? got.height : null, file: null };
+      if (got) {
+        try { await io.writeBinary(`${job.dir}/verify_${l.order}.raw`, got.data); c.file = `verify_${l.order}.raw`; }
+        catch (e) { /* 진단용 */ }
+      }
+      return c;
+    };
     const patched = {};
     result.patches.forEach((p) => { patched[p.order] = p; });
     for (const l of dupTree) {
@@ -240,12 +253,18 @@ async function applyToDuplicate(deps, doc, job, result, log) {
         } else if (!got || layerHash(got.data, got.components) !== p.expected_hash ||
                    JSON.stringify(got.bounds) !== JSON.stringify(p.expected_bounds)) {
           problems.push(`${l.path}: 적용 결과가 엔진 계산과 다름`);
+          checks.push(await saveCheck(l, got, p.expected_hash, p.expected_bounds));
         }
       } else if (!got || layerHash(got.data, got.components) !== job.orig[l.order].hash) {
         problems.push(`${l.path}: 수정하지 않은 레이어가 바뀜`);
+        checks.push(await saveCheck(l, got, job.orig[l.order].hash, job.orig[l.order].bounds));
       }
     }
-    if (problems.length) { dup.closeWithoutSaving(); dup = null; }     // 불확실하면 적용하지 않음
+    if (problems.length) {
+      try { await io.writeText(`${job.dir}/apply_check.json`, JSON.stringify({ problems, checks }, null, 1)); }
+      catch (e) { /* 진단용 */ }
+      dup.closeWithoutSaving(); dup = null;                          // 불확실하면 적용하지 않음
+    }
   }, { commandName: "클린업: 복제본에 적용" });
   return { dup, applied: problems.length ? 0 : result.patches.length, problems };
 }

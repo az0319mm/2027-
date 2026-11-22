@@ -47,7 +47,8 @@ def make_job(job_dir: Path, size, layers: list[dict], config: dict, kind: str = 
 
 
 def apply_patches(job_dir: Path, result: dict, layers: list[dict], size):
-    """플러그인이 putPixels 로 하는 일을 numpy 로 재현 → 레이어별 캔버스 RGBA."""
+    """플러그인이 putPixels 로 하는 일을 numpy 로 재현 → 레이어별 캔버스 RGBA.
+    실제 Photoshop 처럼 replace: true 는 레이어 전체를 패치로 바꾼다 (패치 밖은 투명)."""
     W, H = size
     canv = {i: np.array(L["rgba"], np.uint8).copy() for i, L in enumerate(layers) if "rgba" in L}
     for p in result["patches"]:
@@ -55,6 +56,8 @@ def apply_patches(job_dir: Path, result: dict, layers: list[dict], size):
         reg = np.fromfile(job_dir / p["file"], dtype=np.uint8).reshape(p["height"], p["width"], c)
         tgt = canv[p["order"]]
         y, x = p["top"], p["left"]
+        if c == 4:
+            tgt[:] = 0
         if c == 3:
             tgt[y:y + p["height"], x:x + p["width"], :3] = reg
         else:

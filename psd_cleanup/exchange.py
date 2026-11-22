@@ -99,21 +99,21 @@ def process_job(job_dir: str | Path) -> dict:
         changed = np.any(vis(new) != vis(orig), axis=2)
         if not changed.any():
             continue
-        ys, xs = np.nonzero(changed)
-        y0, y1, x0, x1 = int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
-        region = new[y0:y1, x0:x1]
-        if comps == 3:
-            region = region[..., :3]
-        fname = f"patch_{int(L['order'])}.raw"
-        _atomic_write(job / fname, np.ascontiguousarray(region).tobytes())
+        # Photoshop putPixels(replace: true) 는 '대상 영역'이 아니라 레이어 전체를 주어진 픽셀로 바꾼다
+        # (실제 Mac 테스트: 바뀐 1px 줄만 남고 나머지가 사라짐). 그래서 바뀐 부분만이 아니라
+        # 수정된 레이어 전체(픽셀이 있는 영역으로 잘라낸 것)를 패치로 보낸다.
         b = L["bounds"]
         full = new if comps == 4 else new[..., :3]
-        trimmed, tb = _trim_layer(full if comps == 4 else new, comps, b[0], b[1])
+        trimmed, tb = _trim_layer(full, comps, b[0], b[1])
+        if trimmed is None:
+            continue                                              # 레이어가 통째로 비는 경우는 자동 적용하지 않음
+        fname = f"patch_{int(L['order'])}.raw"
+        _atomic_write(job / fname, np.ascontiguousarray(trimmed).tobytes())
         patches.append({
             "order": int(L["order"]), "id": L.get("id"), "path": L.get("path"), "file": fname,
-            "left": int(b[0] + x0), "top": int(b[1] + y0), "width": x1 - x0, "height": y1 - y0, "components": comps,
-            "changed_pixels": int(changed.sum()),
-            "expected_bounds": tb, "expected_hash": crc32_hex(trimmed) if trimmed is not None else None,
+            "left": int(tb[0]), "top": int(tb[1]), "width": int(tb[2] - tb[0]), "height": int(tb[3] - tb[1]),
+            "components": comps, "changed_pixels": int(changed.sum()),
+            "expected_bounds": tb, "expected_hash": crc32_hex(trimmed),
         })
 
     # 비교 이미지 (근사 합성: 보이는 픽셀 레이어 Normal 합성)
