@@ -66,6 +66,13 @@ def remove_paper(rgba: np.ndarray, paper_rgb: tuple[int, int, int] | None = None
     # 종이 가장자리(투명과 맞닿은 곳에서 edge_band px 이내)의 선·그림자는 '벽'이 되지 않도록 물감 판정에서 제외
     d_edge = ndimage.distance_transform_edt(present)
     ink = present & (dist > ink_thr) & (d_edge > edge_band)
+    # 옅은 물감(흰 꽃잎의 회색 음영, 옅은 수채 번짐): 종이 질감 노이즈보다 확실히 진하고
+    # 진한 물감과 이어져 있으면 모티브로 인정 (종이 질감은 이 기준 아래라 퍼지지 않음)
+    paperish = present & (dist <= ink_thr)
+    noise = float(np.std(dist[paperish])) if paperish.any() else 3.0
+    light_thr = max(12.0, 4.0 * noise)
+    light = present & (dist > light_thr) & (d_edge > edge_band)
+    ink = ndimage.binary_propagation(ink, mask=light | ink)
 
     # 2) 틈 닫기 → 3) 둘러싸인 안쪽 채우기
     closed = ndimage.binary_closing(ink, structure=_disk(close_r), border_value=0) | ink

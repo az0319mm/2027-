@@ -110,7 +110,7 @@ $("btnRun").addEventListener("click", async () => {
     const s = r.summary;
     const lines = [`자동 수정 ${s.applied_fixes}건, 변경 ${s.changed_pixels_total}px`,
                    `파일 검증(psd-tools): ${s.verification_passed ? "통과" : "실패"}`,
-                   `결과: ${r.outputs.clean_psd}`, `보고서: ${r.outputs.qa_html}`];
+                   `결과: ${r.outputs.clean_psd}`].concat(r.outputs.qa_html ? [`보고서: ${r.outputs.qa_html}`] : []);
     // Photoshop 재열기 검증 (명세 5장 2번)
     let reopened = null;
     await core.executeAsModal(async () => {

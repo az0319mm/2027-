@@ -63,7 +63,7 @@ def test_host_header_rejected(srv):
 def test_run_job_end_to_end(srv, tmp_path):
     src = build_psd(tmp_path / "a.psd", (W, H), [dict(name="Background", rgba=_bg()),
                                                 dict(name="motif", rgba=_defect_motif())])
-    code, body = _req(srv + "/api/run", {"inputs": [str(src)], "config": {"work_type": "apparel"},
+    code, body = _req(srv + "/api/run", {"inputs": [str(src)], "config": {"work_type": "apparel", "write_reports": True},
                                          "out_dir": str(tmp_path / "out")}, OK)
     assert code == 200, body
     jid = json.loads(body)["job_id"]

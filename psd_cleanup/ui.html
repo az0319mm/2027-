@@ -67,6 +67,7 @@ img{max-width:100%;border:1px solid var(--line)}
 <fieldset><legend>보호</legend>
 <div class="row">수정 금지 레이어 이름 (쉼표, * 사용 가능) <input type="text" id="protect" placeholder="sign*, 로고"></div>
 <label><input type="checkbox" id="nofix"> 검수만 하기 (자동 수정 안 함)</label>
+<label><input type="checkbox" id="reports"> 보고서·비교 이미지도 만들기 (기본: 결과 PSD만)</label>
 </fieldset>
 
 <p><button id="run">자동 클린업 실행</button> <button id="cancel" class="secondary" disabled>취소</button></p>
@@ -87,7 +88,8 @@ document.querySelectorAll("input[name=type]").forEach(r => r.addEventListener("c
 function cfg() {
   const t = document.querySelector("input[name=type]:checked").value;
   const c = {work_type: t, repeat: document.querySelector("input[name=repeat]:checked").value,
-             protected_layers: list($("protect").value), auto_fix: !$("nofix").checked};
+             protected_layers: list($("protect").value), auto_fix: !$("nofix").checked,
+             write_reports: $("reports").checked};
   if (t === "apparel") {
     if ($("color_count").value) c.expected_color_count = parseInt($("color_count").value, 10);
     c.allowed_colors = list($("colors").value);
@@ -111,7 +113,7 @@ function show(results) {
       ${r.error ? `<div class="bad">${esc(r.error)}</div>` : ""}
       ${ok ? `<div>자동 수정 ${s.applied_fixes}건 · 변경 ${s.changed_pixels_total}px · 저장 후 검증 ${s.verification_passed ? "통과" : "실패"}</div>
       <div>결과 PSD: <code>${esc(o.clean_psd || "")}</code></div>
-      <div><a href="${fileUrl(o.qa_html)}" target="_blank">QA 보고서 열기</a></div>
+      ${o.qa_html ? `<div><a href="${fileUrl(o.qa_html)}" target="_blank">QA 보고서 열기</a></div>` : ""}
       ${o.diff_png ? `<img src="${fileUrl(o.diff_png)}" alt="diff">` : ""}` : ""}</div>`;
   }).join("");
 }

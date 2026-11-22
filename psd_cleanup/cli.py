@@ -39,6 +39,8 @@ def _cfg_from_args(a) -> ProjectConfig:
         cfg.auto_fix = False
     if getattr(a, "fix_repeats", False):
         cfg.fix_repeats = True
+    if getattr(a, "with_report", False):
+        cfg.write_reports = True
     if getattr(a, "remove_paper", False):
         cfg.remove_paper = True
     if getattr(a, "one_color_per_layer", False):
@@ -68,6 +70,7 @@ def main(argv=None) -> int:
         p.add_argument("--no-fix", action="store_true", help="검수만 (자동 수정 없음)")
         p.add_argument("--fix-repeats", action="store_true",
                        help="어패럴: 모티브 복제본마다 반복된 1픽셀도 실수로 보고 수정 (보고서 확인 후 사용)")
+        p.add_argument("--with-report", action="store_true", help="결과 PSD 외에 QA 보고서/비교 이미지도 생성")
         p.add_argument("--remove-paper", action="store_true", help="인테리어: 스캔 종이 배경을 지우고 모티브만 남김")
         p.add_argument("--one-color-per-layer", action="store_true", help="어패럴: 레이어 하나 = 분판 색 하나 구조")
         p.add_argument("--save-config", help="현재 설정을 JSON으로 저장")

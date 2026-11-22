@@ -334,10 +334,10 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
                                  separation_slots=sep.slots if sep else None)
 
     # ----------------------------------------------------------- 보고서
-    prog(0.92, "보고서 생성")
+    prog(0.92, "보고서 생성" if cfg.write_reports else "마무리")
     from . import report
-    clean_doc = PSDDocument(paths["clean_psd"])
-    merged_after = clean_doc.merged_rgb()
+    clean_doc = PSDDocument(paths["clean_psd"]) if cfg.write_reports else None
+    merged_after = clean_doc.merged_rgb() if clean_doc is not None else None
     changed_canvas = np.zeros((H, W), dtype=bool)
     for idx, new in expected_new.items():
         l = doc.layer_by_index(idx)
@@ -348,7 +348,7 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         ys, xs = ys + y0, xs + x0
         ok = (ys >= 0) & (ys < H) & (xs >= 0) & (xs < W)
         changed_canvas[ys[ok], xs[ok]] = True
-    if merged is not None:
+    if merged is not None and cfg.write_reports:
         report.diff_image(merged, changed_canvas).save(paths["diff_png"])
         report.fixes_sheet(merged, merged_after if merged_after is not None else merged,
                            changed_canvas).save(paths["fixes_png"])
@@ -358,7 +358,7 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
             R.tile_preview(merged_after if merged_after is not None else merged, cfg.repeat,
                            seam_comp).save(paths["repeat_png"])
             res.outputs["repeat_png"] = str(paths["repeat_png"])
-    if engine.name == "interior" and layer_rgba:
+    if engine.name == "interior" and layer_rgba and cfg.write_reports:
         img = report.background_check(doc, layer_rgba, W, H)
         if img is not None:
             after_rgba = {**layer_rgba, **expected_new}
@@ -399,10 +399,11 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         "findings": [f.to_dict() for f in findings],
         "outputs": {k: str(v) for k, v in paths.items()},
     }
-    paths["qa_json"].write_text(json.dumps(res.qa, ensure_ascii=False, indent=1), encoding="utf-8")
-    report.write_html(res.qa, paths, res.outputs)
-    res.outputs.update({"clean_psd": str(paths["clean_psd"]), "qa_json": str(paths["qa_json"]),
-                        "qa_html": str(paths["qa_html"])})
+    res.outputs["clean_psd"] = str(paths["clean_psd"])
+    if cfg.write_reports:   # 기본은 결과 PSD 하나만 생성 (검사·검증 결과는 res.qa 로 화면/CLI에 전달)
+        paths["qa_json"].write_text(json.dumps(res.qa, ensure_ascii=False, indent=1), encoding="utf-8")
+        report.write_html(res.qa, paths, res.outputs)
+        res.outputs.update({"qa_json": str(paths["qa_json"]), "qa_html": str(paths["qa_html"])})
     res.status = "ok" if verification["passed"] else "failed"
     if not verification["passed"]:
         res.error = "저장 후 검증 실패: " + "; ".join(verification["failures"][:5])

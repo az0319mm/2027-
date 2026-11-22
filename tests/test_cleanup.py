@@ -68,6 +68,7 @@ def _changed(a, b):
 
 
 def _run(src, tmp_path, **cfg):
+    cfg.setdefault("write_reports", True)
     return run_file(src, ProjectConfig(**cfg), tmp_path / "out", overwrite_outputs=True)
 
 
@@ -767,3 +768,12 @@ def test_remove_paper_keeps_motif_soft_edges_and_inner_white(tmp_path):
     comp = out[..., :3] * al + np.array([5, 0, 254]) * (1 - al)
     assert comp[edge].mean(axis=0)[0] < 200
     assert sha256_file(src) == r.qa["input_sha256_before"]
+
+
+
+def test_default_outputs_only_the_psd(tmp_path, defect_psd):
+    """사용자 요청: 기본은 결과 PSD 하나만 생성."""
+    r = run_file(defect_psd, ProjectConfig(), tmp_path / "only")
+    files = sorted(p.name for p in (tmp_path / "only").iterdir())
+    assert files == ["defect_CLEAN.psd"], files
+    assert r.status == "ok" and r.summary["verification_passed"]

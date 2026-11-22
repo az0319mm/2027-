@@ -56,6 +56,7 @@ class ProjectConfig:
 
     # --- 동작 ---
     auto_fix: bool = True          # False 이면 검수만 (Phase 1 모드)
+    write_reports: bool = False    # True 면 QA.html/QA.json/비교 PNG 도 생성 (기본: 결과 PSD 하나만)
     fix_types: list[str] | None = None  # None = 엔진 기본값. 특정 유형만 수정하고 싶을 때
     fix_repeats: bool = False      # 어패럴: 복제본마다 똑같이 반복된 1픽셀도 '복사된 실수'로 보고 수정 (사람이 확인 후 켬)
     repeat_min: int = 3            # 같은 형태가 이 횟수 이상 반복되면 '의도적 반복'으로 간주 (5쪽)
