@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -37,9 +38,9 @@ def crc32_hex(data: bytes | np.ndarray) -> str:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    import threading
-    # 스레드마다 다른 임시 이름 (생존 신호 스레드와 작업 처리가 같은 파일을 동시에 쓰면 이름이 겹쳐 실패하던 문제)
-    tmp = path.with_name(f".tmp_{os.getpid()}_{threading.get_ident()}_" + path.name)
+    # 임시 파일 이름을 프로세스·스레드마다 다르게: 생존 신호 스레드와 작업 스레드가 동시에 engine.json 을 쓰면
+    # 같은 임시 파일을 서로 옮겨 버려 FileNotFoundError 가 나고, 예전 버전에선 엔진 전체가 꺼졌다.
+    tmp = path.with_name(f".tmp_{os.getpid()}_{threading.get_ident()}_{path.name}")
     with open(tmp, "wb") as f:
         f.write(data)
         f.flush()
@@ -98,21 +99,21 @@ def process_job(job_dir: str | Path) -> dict:
         changed = np.any(vis(new) != vis(orig), axis=2)
         if not changed.any():
             continue
-        ys, xs = np.nonzero(changed)
-        y0, y1, x0, x1 = int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
-        region = new[y0:y1, x0:x1]
-        if comps == 3:
-            region = region[..., :3]
-        fname = f"patch_{int(L['order'])}.raw"
-        _atomic_write(job / fname, np.ascontiguousarray(region).tobytes())
+        # Photoshop putPixels(replace: true) 는 '대상 영역'이 아니라 레이어 전체를 주어진 픽셀로 바꾼다
+        # (실제 Mac 테스트: 바뀐 1px 줄만 남고 나머지가 사라짐). 그래서 바뀐 부분만이 아니라
+        # 수정된 레이어 전체(픽셀이 있는 영역으로 잘라낸 것)를 패치로 보낸다.
         b = L["bounds"]
         full = new if comps == 4 else new[..., :3]
-        trimmed, tb = _trim_layer(full if comps == 4 else new, comps, b[0], b[1])
+        trimmed, tb = _trim_layer(full, comps, b[0], b[1])
+        if trimmed is None:
+            continue                                              # 레이어가 통째로 비는 경우는 자동 적용하지 않음
+        fname = f"patch_{int(L['order'])}.raw"
+        _atomic_write(job / fname, np.ascontiguousarray(trimmed).tobytes())
         patches.append({
             "order": int(L["order"]), "id": L.get("id"), "path": L.get("path"), "file": fname,
-            "left": int(b[0] + x0), "top": int(b[1] + y0), "width": x1 - x0, "height": y1 - y0, "components": comps,
-            "changed_pixels": int(changed.sum()),
-            "expected_bounds": tb, "expected_hash": crc32_hex(trimmed) if trimmed is not None else None,
+            "left": int(tb[0]), "top": int(tb[1]), "width": int(tb[2] - tb[0]), "height": int(tb[3] - tb[1]),
+            "components": comps, "changed_pixels": int(changed.sum()),
+            "expected_bounds": tb, "expected_hash": crc32_hex(trimmed),
         })
 
     # 비교 이미지 (근사 합성: 보이는 픽셀 레이어 Normal 합성)
@@ -234,7 +235,10 @@ def handle_one(job: Path) -> None:
         return
     marker.write_text(str(os.getpid()))
     STATE.update(state="busy", job=job.name)
-    _heartbeat("busy", job.name)
+    try:
+        _heartbeat("busy", job.name)
+    except OSError:
+        pass
     try:
         res = process_job(job)
     except Exception as ex:
@@ -245,7 +249,10 @@ def handle_one(job: Path) -> None:
     except OSError:
         pass
     STATE.update(state="idle", job=None)
-    _heartbeat("idle")
+    try:
+        _heartbeat("idle")
+    except OSError:
+        pass
 
 
 def watch(poll: float = 0.5, once: bool = False) -> None:
@@ -260,7 +267,6 @@ def watch(poll: float = 0.5, once: bool = False) -> None:
     cleanup_old_jobs()
     recover_interrupted_jobs()
     # 살아 있음 신호: 큰 PSD 를 처리하는 동안에도 2초마다 갱신 (별도 스레드)
-    import threading
     stop = threading.Event()
 
     def beat():

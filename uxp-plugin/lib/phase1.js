@@ -139,11 +139,14 @@ async function runPhase1(deps, log) {
       const dupTree = walkLayers(dup.layers);
       const t = dupTree[target.layer.order];
       if (!t || t.path !== target.layer.path) throw new Error("복제본에서 같은 레이어를 찾지 못함");
-      const imgData = await imaging.createImageDataFromBuffer(new Uint8Array(after), {
-        width: 1, height: 1, components: c, chunky: true, colorSpace: info.colorSpace, colorProfile: info.colorProfile,
+      // putPixels(replace: true) 는 레이어 전체를 바꾸므로 (실제 Photoshop 확인) 1픽셀만 바꾼 레이어 전체를 넣는다
+      const whole = new Uint8Array(targetOrig);
+      whole.set(after, px.i);
+      const imgData = await imaging.createImageDataFromBuffer(whole, {
+        width: info.width, height: info.height, components: c, chunky: true, colorSpace: info.colorSpace, colorProfile: info.colorProfile,
       });
       await imaging.putPixels({ documentID: dup.id, layerID: t.id, imageData: imgData,
-                                targetBounds: { left: docX, top: docY }, replace: true, commandName: "테스트 픽셀" });
+                                targetBounds: { left: info.bounds[0], top: info.bounds[1] }, replace: true, commandName: "테스트 픽셀" });
       if (imgData.dispose) await imgData.dispose();
     });
     check(4, "복제본에 테스트 픽셀 1개 수정 (원본은 그대로)", true,

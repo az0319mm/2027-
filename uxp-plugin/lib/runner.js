@@ -122,24 +122,20 @@ async function analyze(snap, kind, onProgress) {
   return r;
 }
 
-// 패치로 실제 바뀌는 캔버스 좌표 (비교 화면·보고서용)
+// 패치로 실제 바뀌는 캔버스 좌표 (비교 화면·보고서용). 패치는 레이어 전체이므로 원래 영역과 새 영역을 합쳐 비교
 function changedPoints(snap, patches) {
   const pts = [];
   for (const p of patches) {
-    const L = snap.req.layers[p.order], src = snap.data.layers.get(p.order);
-    const b = L.bounds, w = b[2] - b[0], c = p.components;
-    for (let y = 0; y < p.height; y++) for (let x = 0; x < p.width; x++) {
-      const cx = p.left + x, cy = p.top + y, s = (y * p.width + x) * c;
-      let before = null;
-      if (src && cx >= b[0] && cx < b[2] && cy >= b[1] && cy < b[3]) before = ((cy - b[1]) * w + (cx - b[0])) * c;
-      let diff = false;
-      for (let k = 0; k < c; k++) {
-        const ov = before === null ? 0 : src[before + k];
-        if (ov !== p.data[s + k]) { diff = true; break; }
-      }
-      if (c === 4 && before !== null && src[before + 3] === 0 && p.data[s + 3] === 0) diff = false;
-      if (c === 4 && before === null && p.data[s + 3] === 0) diff = false;
-      if (diff) pts.push([cx, cy, p.path]);
+    const L = snap.req.layers[p.order], src = snap.data.layers.get(p.order), c = p.components;
+    const b = L.bounds || [p.left, p.top, p.left, p.top], w = b[2] - b[0];
+    const nb = [p.left, p.top, p.left + p.width, p.top + p.height];
+    const at = (data, bb, ww, x, y, k) => (data && x >= bb[0] && x < bb[2] && y >= bb[1] && y < bb[3]
+      ? data[((y - bb[1]) * ww + (x - bb[0])) * c + k] : 0);
+    for (let y = Math.min(b[1], nb[1]); y < Math.max(b[3], nb[3]); y++) for (let x = Math.min(b[0], nb[0]); x < Math.max(b[2], nb[2]); x++) {
+      const a0 = c === 4 ? at(src, b, w, x, y, 3) : 255, a1 = c === 4 ? at(p.data, nb, p.width, x, y, 3) : 255;
+      let diff = (a0 === 0) !== (a1 === 0);
+      if (!diff && a0 !== 0) for (let k = 0; k < c; k++) if (at(src, b, w, x, y, k) !== at(p.data, nb, p.width, x, y, k)) { diff = true; break; }
+      if (diff) pts.push([x, y, p.path]);
     }
   }
   return pts;

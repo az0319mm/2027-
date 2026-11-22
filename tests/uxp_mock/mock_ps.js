@@ -118,6 +118,7 @@ function makeEnv(opts) {
       if (l.allLocked || l.pixelsLocked) throw new Error("layer locked");
       const b = l.bounds, c = l.components || 4, w = b.right - b.left;
       const src = await o.imageData.getData();
+      if (o.replace !== false && c === 4) l.pixels.fill(0);   // 실제 Photoshop: replace(기본 true)는 레이어 전체를 교체
       for (let y = 0; y < o.imageData.height; y++)
         for (let x = 0; x < o.imageData.width; x++)
           for (let k = 0; k < c; k++)

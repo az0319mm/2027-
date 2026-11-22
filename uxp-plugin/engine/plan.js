@@ -398,40 +398,37 @@ function trimmedHash(img, comps, left, top) {
   if (comps !== 4) {
     const out = new Uint8Array(w * h * 3);
     for (let k = 0; k < w * h; k++) { out[k * 3] = d[k * 4]; out[k * 3 + 1] = d[k * 4 + 1]; out[k * 3 + 2] = d[k * 4 + 2]; }
-    return { hash: crc32(out), bounds: [left, top, left + w, top + h] };
+    return { hash: crc32(out), bounds: [left, top, left + w, top + h], data: out };
   }
   let x0 = w, y0 = h, x1 = -1, y1 = -1;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (d[(y * w + x) * 4 + 3] > 0) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-  if (x1 < 0) return { hash: null, bounds: null };
+  if (x1 < 0) return { hash: null, bounds: null, data: null };
   const tw = x1 - x0 + 1, th = y1 - y0 + 1, out = new Uint8Array(tw * th * 4);
   for (let y = 0; y < th; y++) for (let x = 0; x < tw; x++) {
     const s = ((y + y0) * w + x + x0) * 4, t = (y * tw + x) * 4;
     if (d[s + 3] === 0) continue;
     out[t] = d[s]; out[t + 1] = d[s + 1]; out[t + 2] = d[s + 2]; out[t + 3] = d[s + 3];
   }
-  return { hash: crc32(out), bounds: [left + x0, top + y0, left + x1 + 1, top + y1 + 1] };
+  return { hash: crc32(out), bounds: [left + x0, top + y0, left + x1 + 1, top + y1 + 1], data: out };
 }
 
+// Photoshop putPixels(replace: true) 는 '대상 영역'이 아니라 레이어 전체를 주어진 픽셀로 바꾼다
+// (실제 Mac·Photoshop 27.11 확인). 그래서 바뀐 부분만이 아니라 수정된 레이어 전체(픽셀 영역으로 자른 것)를 패치로 보낸다.
 function makePatches(doc, plan) {
   const patches = [];
   for (const [idx, nw] of Array.from(plan.expectedNew.entries()).sort((a, b) => a[0] - b[0])) {
     const l = doc.layer(idx), orig = doc.images.get(idx), comps = l.components;
-    let x0 = nw.w, y0 = nw.h, x1 = -1, y1 = -1, n = 0;
-    for (let y = 0; y < nw.h; y++) for (let x = 0; x < nw.w; x++) {
-      const p = (y * nw.w + x) * 4;
+    let n = 0;
+    for (let p = 0; p < nw.w * nw.h * 4; p += 4) {
       const va = nw.d[p + 3] === 0, vb = orig.d[p + 3] === 0;
-      const diff = va !== vb || (!va && (nw.d[p] !== orig.d[p] || nw.d[p + 1] !== orig.d[p + 1] || nw.d[p + 2] !== orig.d[p + 2] || nw.d[p + 3] !== orig.d[p + 3]));
-      if (diff) { n++; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+      if (va !== vb || (!va && (nw.d[p] !== orig.d[p] || nw.d[p + 1] !== orig.d[p + 1] || nw.d[p + 2] !== orig.d[p + 2] || nw.d[p + 3] !== orig.d[p + 3]))) n++;
     }
     if (!n) continue;
-    const rw = x1 - x0 + 1, rh = y1 - y0 + 1, region = new Uint8Array(rw * rh * comps);
-    for (let y = 0; y < rh; y++) for (let x = 0; x < rw; x++) {
-      const s = ((y + y0) * nw.w + x + x0) * 4, t = (y * rw + x) * comps;
-      for (let c = 0; c < comps; c++) region[t + c] = nw.d[s + c];
-    }
     const th = trimmedHash(nw, comps, l.bbox[0], l.bbox[1]);
-    patches.push({ order: l.order, id: l.layer_id, path: l.path, left: l.bbox[0] + x0, top: l.bbox[1] + y0, width: rw, height: rh,
-                   components: comps, changed_pixels: n, expected_bounds: th.bounds, expected_hash: th.hash, data: region });
+    if (!th.hash) continue;                                   // 레이어가 통째로 비는 경우는 자동 적용하지 않음
+    patches.push({ order: l.order, id: l.layer_id, path: l.path, left: th.bounds[0], top: th.bounds[1],
+                   width: th.bounds[2] - th.bounds[0], height: th.bounds[3] - th.bounds[1],
+                   components: comps, changed_pixels: n, expected_bounds: th.bounds, expected_hash: th.hash, data: th.data });
   }
   return patches;
 }
