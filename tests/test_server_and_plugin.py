@@ -124,3 +124,18 @@ console.log(JSON.stringify({{g, b}}));
     res = json.loads(out)
     assert res["g"]["ok"], res["g"]
     assert not res["b"]["ok"] and any("불투명도" in p for p in res["b"]["problems"])
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node 없음")
+@pytest.mark.parametrize("scenario,should_pass", [("ok", True), ("corrupt", False), ("locked", False)])
+def test_uxp_phase1_flow_on_mock_photoshop(tmp_path, scenario, should_pass):
+    """1단계 플러그인 흐름을 모의 Photoshop 으로 검증 (실제 Photoshop 동작은 별도 확인 필요)."""
+    out = subprocess.run(["node", str(ROOT / "tests" / "uxp_mock" / "run_phase1.js"), scenario, str(tmp_path)],
+                         capture_output=True, text=True, check=True).stdout
+    r = json.loads(out)
+    assert r["passed"] is should_pass
+    assert r["originalUntouched"] and r["origLayerPixelsUnchanged"]
+    if scenario == "ok":
+        assert r["savedPath"].endswith("_UXPTEST.psd") and len(r["openDocs"]) == 1
+    if scenario == "corrupt":
+        assert any(not c["ok"] and "opacity" in c["detail"] for c in r["checks"])

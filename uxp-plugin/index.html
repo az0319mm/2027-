@@ -4,60 +4,53 @@
 <meta charset="utf-8">
 <style>
   body { color: var(--uxp-host-text-color); font-size: 12px; padding: 8px; }
-  h2 { font-size: 14px; margin: 4px 0 8px; }
+  h2 { font-size: 14px; margin: 4px 0 6px; }
+  h3 { font-size: 12px; margin: 14px 0 4px; }
   .row { margin: 6px 0; }
   .note { color: var(--uxp-host-text-color-secondary); font-size: 11px; }
-  .ok { color: #4caf50; } .bad { color: #ef5350; }
-  pre { white-space: pre-wrap; font-size: 11px; max-height: 260px; overflow: auto; }
+  textarea { width: 100%; height: 300px; font-size: 11px; }
   sp-button { margin: 2px 4px 2px 0; }
+  .box { border: 1px solid var(--uxp-host-border-color); border-radius: 4px; padding: 6px; margin: 6px 0; }
 </style>
 </head>
 <body>
   <h2>졸업작품 PSD 클린업</h2>
-  <div class="note">로컬 서버(127.0.0.1:8765)가 실행 중이어야 합니다: <br><code>python -m psd_cleanup serve</code></div>
 
-  <div class="row">
-    <sp-label>유형</sp-label>
-    <sp-radio-group id="type">
-      <sp-radio value="apparel" checked>어패럴</sp-radio>
-      <sp-radio value="interior">인테리어</sp-radio>
-    </sp-radio-group>
+  <div class="box">
+    <h3>1단계 · Photoshop 연동 테스트</h3>
+    <div class="note">열려 있는(저장된) PSD로 다음을 자동 확인합니다:
+      문서 인식 → 전체 레이어 탐색 → 픽셀 읽기 → <b>복제본</b>에 1픽셀 수정 → <b>새 PSD</b>(원본이름_UXPTEST.psd)로 저장
+      → 다시 열어 레이어·픽셀 보존 검증. 원본 문서와 원본 파일은 바꾸지 않습니다.</div>
+    <div class="row"><sp-button id="btnPhase1" variant="cta">1단계 테스트 실행</sp-button></div>
   </div>
-  <div class="row">
-    <sp-label>리핏</sp-label>
-    <sp-radio-group id="repeat">
-      <sp-radio value="vertical">상하</sp-radio>
-      <sp-radio value="horizontal">좌우</sp-radio>
-      <sp-radio value="both">상하좌우</sp-radio>
-      <sp-radio value="none" checked>해당 없음</sp-radio>
-    </sp-radio-group>
-  </div>
-  <div class="row" id="apparelBox">
-    <sp-textfield id="colorCount" type="number" placeholder="도수 (선택)"></sp-textfield>
-    <sp-textfield id="colors" placeholder="허용 색 #FFFFFF,#F4A7B9 (선택)"></sp-textfield>
-  </div>
-  <div class="row" id="interiorBox" style="display:none">
-    <sp-picker id="style" label="표현 방식">
-      <sp-menu slot="options">
-        <sp-menu-item value="digital" selected>디지털 색면</sp-menu-item>
-        <sp-menu-item value="watercolor">수채화</sp-menu-item>
-        <sp-menu-item value="pencil">색연필</sp-menu-item>
-        <sp-menu-item value="crayon">크레파스</sp-menu-item>
-      </sp-menu>
-    </sp-picker>
-    <sp-textfield id="texture" placeholder="승인 질감 레이어 (쉼표)"></sp-textfield>
-  </div>
-  <div class="row"><sp-textfield id="protect" placeholder="수정 금지 레이어 (쉼표, * 가능)"></sp-textfield></div>
-  <div class="row"><sp-checkbox id="nofix">검수만 (자동 수정 안 함)</sp-checkbox></div>
 
-  <div class="row">
-    <sp-button id="btnHealth" variant="secondary">서버 확인</sp-button>
-    <sp-button id="btnLayers" variant="secondary">레이어 읽기·대조</sp-button>
-    <sp-button id="btnRun" variant="cta">자동 클린업 실행</sp-button>
+  <div class="box">
+    <h3>2단계 · 자동 클린업 (Python 로컬 서버 필요, 1단계 확인 후 사용)</h3>
+    <div class="row">
+      <sp-radio-group id="type">
+        <sp-radio value="apparel" checked>어패럴</sp-radio>
+        <sp-radio value="interior">인테리어</sp-radio>
+      </sp-radio-group>
+    </div>
+    <div class="row">
+      <sp-radio-group id="repeat">
+        <sp-radio value="none" checked>리핏 없음</sp-radio>
+        <sp-radio value="horizontal">좌우</sp-radio>
+        <sp-radio value="vertical">상하</sp-radio>
+        <sp-radio value="both">상하좌우</sp-radio>
+      </sp-radio-group>
+    </div>
+    <div class="row"><sp-checkbox id="removePaper">인테리어: 스캔 종이 배경 지우기</sp-checkbox></div>
+    <div class="row"><sp-checkbox id="fixRepeats">어패럴: 반복된 1픽셀도 고치기</sp-checkbox></div>
+    <div class="row">
+      <sp-button id="btnHealth" variant="secondary">서버 확인</sp-button>
+      <sp-button id="btnRun" variant="secondary">자동 클린업 실행</sp-button>
+    </div>
   </div>
+
   <sp-progressbar id="prog" max="100" value="0" style="width:100%"></sp-progressbar>
   <div id="msg" class="note"></div>
-  <pre id="out"></pre>
+  <textarea id="out" readonly></textarea>
   <script src="index.js"></script>
 </body>
 </html>
