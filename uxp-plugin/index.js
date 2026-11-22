@@ -57,7 +57,7 @@ async function dropOldJob() {
 
 async function runEngine(doc, kind) {
   const st = await B.engineStatus(deps);
-  if (!st.alive) throw new Error("클린업 엔진이 실행 중이 아닙니다. 'PSD 클린업 엔진 설치.command'를 한 번 실행했는지 확인하세요.");
+  if (!st.alive) throw new Error("클린업 엔진이 실행 중이 아닙니다 (마지막 신호 " + (st.age ? Math.round(st.age) + "초 전" : "없음") + "). 'PSD 클린업 엔진 설치.command'를 한 번 실행했는지 확인하세요.");
   await dropOldJob();
   log(`레이어 픽셀 내보내는 중… (${doc.name})`);
   const job = await B.exportJob(deps, doc, config(), kind, () => {});
@@ -152,10 +152,18 @@ $("btnSave").addEventListener("click", () => busy("새 PSD로 저장·검증 중
 $("btnReport").addEventListener("click", () => busy("보고서 저장 중…", async () => {
   const io = B.makeIO(deps);
   const src = state.srcDoc || app.activeDocument;
-  const sp = B.splitPath(src.path || src.name);
+  const base = B.splitPath(state.saved || src.path || src.name);
   const html = await io.readText(`${state.job.dir}/report.html`);
-  const out = `${sp.dir}/${sp.base}_QA.html`;
-  await io.writeText(out, html);
+  let out;
+  if (state.saved || src.path) {
+    out = `${base.dir}/${base.base.replace(/_CLEAN$/, "")}_QA.html`;
+    await io.writeText(out, html);
+  } else {                                           // 저장 안 된 문서 → 위치를 물어봄
+    const f = await fs.getFileForSaving(`${base.base}_QA.html`, { types: ["html"] });
+    if (!f) { msg("취소했습니다"); return; }
+    await f.write(html, { format: formats.utf8 });
+    out = f.nativePath;
+  }
   log(`✅ 검수 보고서 저장: ${out}`);
   msg("보고서를 PSD 옆에 저장했습니다");
 }));

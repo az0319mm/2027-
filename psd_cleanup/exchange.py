@@ -205,11 +205,33 @@ def cleanup_old_jobs(max_age_h: float = 24.0) -> int:
     return n
 
 
+STATE = {"state": "idle", "job": None}
+
+
+def recover_interrupted_jobs() -> int:
+    """엔진이 처리 도중 꺼졌던 작업(.processing 만 남고 결과 없음)에 실패 결과를 남겨 플러그인이 기다리지 않게 함."""
+    n = 0
+    jobs = ROOT / "jobs"
+    if not jobs.exists():
+        return 0
+    for d in jobs.iterdir():
+        if d.is_dir() and (d / ".processing").exists() and not (d / "result.json").exists():
+            _write_json(d / "result.json", {"status": "failed",
+                                            "error": "엔진이 처리 도중 중단되었습니다 (메모리 부족 등). 다시 시도해 주세요."})
+            try:
+                (d / ".processing").unlink()
+            except OSError:
+                pass
+            n += 1
+    return n
+
+
 def handle_one(job: Path) -> None:
     marker = job / ".processing"
     if (job / "result.json").exists() or marker.exists() or not (job / "request.json").exists():
         return
     marker.write_text(str(os.getpid()))
+    STATE.update(state="busy", job=job.name)
     _heartbeat("busy", job.name)
     try:
         res = process_job(job)
@@ -220,6 +242,7 @@ def handle_one(job: Path) -> None:
         marker.unlink()
     except OSError:
         pass
+    STATE.update(state="idle", job=None)
     _heartbeat("idle")
 
 
@@ -233,18 +256,30 @@ def watch(poll: float = 0.5, once: bool = False) -> None:
         print("이미 다른 엔진이 실행 중입니다.")
         return
     cleanup_old_jobs()
-    last_beat = 0.0
-    print(f"PSD 클린업 엔진 v{__version__} 감시 중: {ROOT / 'jobs'}")
-    while True:
-        for job in sorted((ROOT / "jobs").iterdir()):
-            if job.is_dir() and not job.name.startswith("."):     # '.' 으로 시작 = 플러그인이 아직 쓰는 중
-                handle_one(job)
-        if time.time() - last_beat > 2:
-            _heartbeat()
-            last_beat = time.time()
-        if once:
-            return
-        time.sleep(poll)
+    recover_interrupted_jobs()
+    # 살아 있음 신호: 큰 PSD 를 처리하는 동안에도 2초마다 갱신 (별도 스레드)
+    import threading
+    stop = threading.Event()
+
+    def beat():
+        while not stop.is_set():
+            try:
+                _heartbeat(STATE["state"], STATE["job"])
+            except OSError:
+                pass
+            stop.wait(2.0)
+    threading.Thread(target=beat, daemon=True).start()
+    print(f"PSD 클린업 엔진 v{__version__} 감시 중: {ROOT / 'jobs'}", flush=True)
+    try:
+        while True:
+            for job in sorted((ROOT / "jobs").iterdir()):
+                if job.is_dir() and not job.name.startswith("."):     # '.' 으로 시작 = 플러그인이 아직 쓰는 중
+                    handle_one(job)
+            if once:
+                return
+            time.sleep(poll)
+    finally:
+        stop.set()
 
 
 def selftest() -> bool:

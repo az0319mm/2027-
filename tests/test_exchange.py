@@ -136,3 +136,40 @@ def test_watch_loop_processes_and_cleans(tmp_path, monkeypatch):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+def test_heartbeat_keeps_updating_while_busy(tmp_path, monkeypatch):
+    """실제 Photoshop 테스트에서 발견: 큰 PSD 처리 중 생존 신호가 멈춰 플러그인이 '엔진 꺼짐'으로 오판."""
+    import psd_cleanup.exchange as X
+    monkeypatch.setattr(X, "ROOT", tmp_path)
+    (tmp_path / "jobs" / "slow").mkdir(parents=True)
+    (tmp_path / "jobs" / "slow" / "request.json").write_text("{}", encoding="utf-8")
+
+    def slow(job):
+        time.sleep(4.5)
+        return {"status": "ok"}
+    monkeypatch.setattr(X, "process_job", slow)
+    t = threading.Thread(target=X.watch, kwargs={"once": True}, daemon=True)
+    t.start()
+    seen = []
+    for _ in range(40):
+        time.sleep(0.1)
+        if (tmp_path / "engine.json").exists():
+            d = json.loads((tmp_path / "engine.json").read_text(encoding="utf-8"))
+            seen.append((time.time() - d["time"], d["state"]))
+    t.join(timeout=10)
+    busy_ages = [age for age, st in seen if st == "busy"]
+    assert busy_ages and max(busy_ages) < 3.0          # 바쁜 동안에도 2초 간격으로 갱신
+    assert json.loads((tmp_path / "jobs" / "slow" / "result.json").read_text())["status"] == "ok"
+
+
+def test_interrupted_job_gets_failed_result(tmp_path, monkeypatch):
+    import psd_cleanup.exchange as X
+    monkeypatch.setattr(X, "ROOT", tmp_path)
+    d = tmp_path / "jobs" / "crashed"
+    d.mkdir(parents=True)
+    (d / "request.json").write_text("{}", encoding="utf-8")
+    (d / ".processing").write_text("123")
+    assert X.recover_interrupted_jobs() == 1
+    r = json.loads((d / "result.json").read_text(encoding="utf-8"))
+    assert r["status"] == "failed" and "중단" in r["error"]

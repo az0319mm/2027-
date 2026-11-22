@@ -174,18 +174,25 @@ async function waitResult(deps, job, onProgress) {
   const io = makeIO(deps);
   const t0 = Date.now();
   let lastAliveCheck = 0;
+  let deadSince = 0;
   for (;;) {
     if (await io.exists(`${job.dir}/result.json`)) {
       return JSON.parse(await io.readText(`${job.dir}/result.json`));
     }
+    let progressFresh = false;
     try {
       const p = JSON.parse(await io.readText(`${job.dir}/progress.json`));
       if (onProgress) onProgress(p.progress, p.message);
+      progressFresh = Date.now() / 1000 - p.time < 60;          // 진행률이 갱신 중이면 엔진은 살아 있음
     } catch (e) { /* 아직 없음 */ }
     if (Date.now() - lastAliveCheck > 5000) {
       lastAliveCheck = Date.now();
       const st = await engineStatus(deps);
-      if (!st.alive && Date.now() - t0 > 15000) throw new Error("클린업 엔진이 꺼져 있습니다. '엔진 설치·실행'을 확인하세요.");
+      if (st.alive || progressFresh) deadSince = 0;
+      else if (!deadSince) deadSince = Date.now();
+      if (deadSince && Date.now() - deadSince > 30000) {
+        throw new Error("클린업 엔진 응답이 30초 넘게 없습니다. 'PSD 클린업 엔진 설치.command'를 다시 실행하거나 ~/PSDCleanup/engine.log 를 보내 주세요.");
+      }
     }
     if (Date.now() - t0 > ENGINE_TIMEOUT_MS) throw new Error("엔진 응답 시간 초과");
     await new Promise((r) => setTimeout(r, deps.pollMs || 500));
@@ -249,13 +256,20 @@ async function saveAndVerify(deps, doc, dup, job, result, log) {
   const io = makeIO(deps);
   const say = log || (() => {});
   const sp = splitPath(doc.path || doc.name);
-  let outPath = `${sp.dir}/${sp.base}_CLEAN.psd`;
-  for (let k = 2; (await io.exists(outPath)) && k < 100; k++) outPath = `${sp.dir}/${sp.base}_CLEAN_${k}.psd`;
+  let outPath, picked = null;
+  if (doc.path) {
+    outPath = `${sp.dir}/${sp.base}_CLEAN.psd`;
+    for (let k = 2; (await io.exists(outPath)) && k < 100; k++) outPath = `${sp.dir}/${sp.base}_CLEAN_${k}.psd`;
+  } else {                                          // 한 번도 저장하지 않은 문서 → 저장 위치를 물어봄
+    picked = await fs.getFileForSaving(`${sp.base}_CLEAN.psd`, { types: ["psd"] });
+    if (!picked) throw new Error("저장을 취소했습니다");
+    outPath = picked.nativePath;
+  }
   if (outPath === String(doc.path).replace(/\\/g, "/")) throw new Error("원본 덮어쓰기 방지");
   const checks = [];
   let re = null;
   await core.executeAsModal(async () => {
-    const entry = await fs.createEntryWithUrl(toFileUrl(outPath), { overwrite: false });
+    const entry = picked || await fs.createEntryWithUrl(toFileUrl(outPath), { overwrite: false });
     await dup.saveAs.psd(entry, { embedColorProfile: true }, false);
     dup.closeWithoutSaving();
     re = await app.open(await fs.getEntryWithUrl(toFileUrl(outPath)));
