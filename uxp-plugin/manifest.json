@@ -2,7 +2,7 @@
   "manifestVersion": 5,
   "id": "kr.graduation2027.psdcleanup",
   "name": "PSD 졸업작품 클린업",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "main": "index.html",
   "host": {
     "app": "PS",
@@ -34,13 +34,6 @@
     }
   ],
   "requiredPermissions": {
-    "network": {
-      "domains": [
-        "http://127.0.0.1:8765",
-        "http://localhost:8765"
-      ]
-    },
     "localFileSystem": "fullAccess"
-  },
-  "icons": []
+  }
 }
