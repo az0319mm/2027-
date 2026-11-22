@@ -1,6 +1,7 @@
 # 2027 졸업작품 PSD 자동 클린업
 
-> **Photoshop 플러그인 1단계(연동 테스트) 설치·실행 방법: [docs/1단계_Photoshop_플러그인_설치_테스트_가이드.md](docs/1단계_Photoshop_플러그인_설치_테스트_가이드.md)**
+> **macOS 설치·사용 방법 (Photoshop 패널 + 백그라운드 엔진): [docs/macOS_설치_및_사용_가이드.md](docs/macOS_설치_및_사용_가이드.md)**
+> 연동 진단(1단계 테스트) 안내: [docs/1단계_Photoshop_플러그인_설치_테스트_가이드.md](docs/1단계_Photoshop_플러그인_설치_테스트_가이드.md)
 
 원본 PSD/PSB를 넣으면 **어패럴 / 인테리어** 유형별 규칙으로 레이어를 검사하고, **확실한 오류만** 고친 뒤
 **레이어가 그대로 유지된 새 PSD**(`원본명_CLEAN.psd`)와 검수 보고서를 만드는 로컬 프로그램입니다.
@@ -183,7 +184,7 @@ python -m psd_cleanup run 작품.psd --config examples/apparel_project.json
 
 ## 5. 검증 현황 (이 개발 환경에서 실제 실행한 것)
 
-### 자동 테스트 — `python -m pytest tests` → **57개 전부 통과** (모의 Photoshop 기반 플러그인 1단계 흐름 테스트 3개 포함)
+### 자동 테스트 — `python -m pytest tests` → **68개 전부 통과** (플러그인 ↔ 엔진 파일 교환 끝까지 연결 테스트, 모의 Photoshop 연동 테스트 포함)
 명세서 5장 항목별 대응:
 
 | # | 테스트 | 결과 |

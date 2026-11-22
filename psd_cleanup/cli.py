@@ -76,7 +76,25 @@ def main(argv=None) -> int:
         p.add_argument("--save-config", help="현재 설정을 JSON으로 저장")
     s = sub.add_parser("serve")
     s.add_argument("--port", type=int, default=8765)
+    sub.add_parser("watch", help="Photoshop 플러그인용 백그라운드 엔진 (~/PSDCleanup/jobs 감시)")
+    sub.add_parser("selftest", help="엔진 자가 테스트")
+    pj = sub.add_parser("process-job", help="작업 폴더 하나 처리 (테스트용)")
+    pj.add_argument("job_dir")
     a = ap.parse_args(argv)
+
+    if a.cmd == "watch":
+        from .exchange import watch
+        watch()
+        return 0
+    if a.cmd == "selftest":
+        from .exchange import selftest
+        return 0 if selftest() else 1
+    if a.cmd == "process-job":
+        from .exchange import handle_one
+        from pathlib import Path as _P
+        handle_one(_P(a.job_dir))
+        print((_P(a.job_dir) / "result.json").read_text(encoding="utf-8")[:2000])
+        return 0
 
     if a.cmd == "serve":
         from .server import serve

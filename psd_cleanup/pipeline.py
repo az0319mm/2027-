@@ -59,29 +59,10 @@ def _intersects(b, r) -> bool:
     return x0 < r.x + r.w and r.x < x1 and y0 < r.y + r.h and r.y < y1
 
 
-def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = None, *,
-             overwrite_outputs: bool = False, progress: ProgressFn | None = None,
-             cancel: threading.Event | None = None) -> RunResult:
-    cfg.validate()
-    src = Path(src).resolve()
-    out_dir = Path(out_dir).resolve() if out_dir else src.parent / "_cleanup_output"
-    paths = output_paths(src, out_dir)
-    res = RunResult(input_path=str(src))
-    prog = progress or (lambda f, m: None)
-
-    def check_cancel():
-        if cancel is not None and cancel.is_set():
-            raise Cancelled()
-
-    if any(p.resolve() == src for p in paths.values()):
-        raise ValueError("출력 경로가 원본과 같습니다.")
-    if paths["clean_psd"].exists() and not overwrite_outputs:
-        raise FileExistsError(f"출력 파일이 이미 있습니다: {paths['clean_psd']} (--overwrite-outputs 로 결과 파일만 덮어쓰기)")
-
-    t0 = time.time()
-    prog(0.02, "PSD 읽는 중")
-    doc = PSDDocument(src)
-    sha_before = doc.sha256
+def plan_cleanup(doc, cfg: ProjectConfig, prog: ProgressFn | None = None, check_cancel=None):
+    """분석 → 안전한 수정 계획(patches/expected_new). PSD 파일(PSDDocument)과 플러그인이 보낸 메모리 문서(MemoryDocument) 공용."""
+    prog = prog or (lambda f, m: None)
+    check_cancel = check_cancel or (lambda: None)
     engine = get_engine(cfg)
     findings: list[Finding] = []
     layer_rgba: dict[int, np.ndarray] = {}
@@ -314,6 +295,40 @@ def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = N
         if chmap:
             patches[idx] = chmap
             expected_new[idx] = new
+    from types import SimpleNamespace
+    return SimpleNamespace(engine=engine, findings=findings, layer_rgba=layer_rgba, analyzed_layers=analyzed_layers,
+                           patches=patches, expected_new=expected_new, sep=sep, sep_reason=sep_reason, merged=merged,
+                           seam_comp=seam_comp, composite_source=composite_source, W=W, H=H)
+
+
+
+def run_file(src: str | Path, cfg: ProjectConfig, out_dir: str | Path | None = None, *,
+             overwrite_outputs: bool = False, progress: ProgressFn | None = None,
+             cancel: threading.Event | None = None) -> RunResult:
+    cfg.validate()
+    src = Path(src).resolve()
+    out_dir = Path(out_dir).resolve() if out_dir else src.parent / "_cleanup_output"
+    paths = output_paths(src, out_dir)
+    res = RunResult(input_path=str(src))
+    prog = progress or (lambda f, m: None)
+
+    def check_cancel():
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+
+    if any(p.resolve() == src for p in paths.values()):
+        raise ValueError("출력 경로가 원본과 같습니다.")
+    if paths["clean_psd"].exists() and not overwrite_outputs:
+        raise FileExistsError(f"출력 파일이 이미 있습니다: {paths['clean_psd']} (--overwrite-outputs 로 결과 파일만 덮어쓰기)")
+
+    t0 = time.time()
+    prog(0.02, "PSD 읽는 중")
+    doc = PSDDocument(src)
+    sha_before = doc.sha256
+    p = plan_cleanup(doc, cfg, prog, check_cancel)
+    engine, findings, layer_rgba, analyzed_layers = p.engine, p.findings, p.layer_rgba, p.analyzed_layers
+    patches, expected_new, sep, sep_reason, merged = p.patches, p.expected_new, p.sep, p.sep_reason, p.merged
+    seam_comp, composite_source, W, H = p.seam_comp, p.composite_source, p.W, p.H
 
     # ----------------------------------------------------------- 저장
     check_cancel()

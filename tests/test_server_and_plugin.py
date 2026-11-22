@@ -139,3 +139,22 @@ def test_uxp_phase1_flow_on_mock_photoshop(tmp_path, scenario, should_pass):
         assert r["savedPath"].endswith("_UXPTEST.psd") and len(r["openDocs"]) == 1
     if scenario == "corrupt":
         assert any(not c["ok"] and "opacity" in c["detail"] for c in r["checks"])
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node 없음")
+@pytest.mark.parametrize("scenario", ["ok", "tamper", "corrupt_save"])
+def test_plugin_engine_file_exchange_end_to_end(tmp_path, scenario):
+    """플러그인 교환 코드(bridge.js) + 실제 Python 엔진, Photoshop 은 모의."""
+    import sys
+    out = subprocess.run(["node", str(ROOT / "tests" / "uxp_mock" / "run_bridge.js"), scenario, str(tmp_path),
+                          sys.executable, str(ROOT)], capture_output=True, text=True, check=True).stdout
+    r = json.loads(out)
+    assert r["status"] == "ok" and r["originalFile"] == "ORIGINAL" and r["originalDocUntouched"]
+    assert r["skipped"] == ["스마트"] and r["jobsLeft"] == []
+    if scenario == "ok":
+        assert r["saved"]["passed"] and r["saved"]["outPath"] == "작품_CLEAN.psd"
+        assert r["patches"] == [["그룹/모티브", 3]]
+    elif scenario == "tamper":
+        assert r["saved"] is None and r["applyProblems"] and "작품_CLEAN.psd" not in r["files"]
+    else:
+        assert r["saved"]["passed"] is False and r["saved"]["outPath"].endswith("_VERIFY_FAILED.psd")

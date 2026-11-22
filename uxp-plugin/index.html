@@ -4,34 +4,29 @@
 <meta charset="utf-8">
 <style>
   body { color: var(--uxp-host-text-color); font-size: 12px; padding: 8px; }
-  h2 { font-size: 14px; margin: 4px 0 6px; }
-  h3 { font-size: 12px; margin: 14px 0 4px; }
-  .row { margin: 6px 0; }
+  h2 { font-size: 14px; margin: 2px 0 6px; }
+  h3 { font-size: 12px; margin: 10px 0 4px; }
+  .row { margin: 5px 0; }
   .note { color: var(--uxp-host-text-color-secondary); font-size: 11px; }
-  textarea { width: 100%; height: 300px; font-size: 11px; }
+  .box { border: 1px solid var(--uxp-host-border-color); border-radius: 4px; padding: 6px 8px; margin: 6px 0; }
   sp-button { margin: 2px 4px 2px 0; }
-  .box { border: 1px solid var(--uxp-host-border-color); border-radius: 4px; padding: 6px; margin: 6px 0; }
+  textarea { width: 100%; height: 260px; font-size: 11px; }
 </style>
 </head>
 <body>
   <h2>졸업작품 PSD 클린업</h2>
 
   <div class="box">
-    <h3>1단계 · Photoshop 연동 테스트</h3>
-    <div class="note">열려 있는(저장된) PSD로 다음을 자동 확인합니다:
-      문서 인식 → 전체 레이어 탐색 → 픽셀 읽기 → <b>복제본</b>에 1픽셀 수정 → <b>새 PSD</b>(원본이름_UXPTEST.psd)로 저장
-      → 다시 열어 레이어·픽셀 보존 검증. 원본 문서와 원본 파일은 바꾸지 않습니다.</div>
-    <div class="row"><sp-button id="btnPhase1" variant="cta">1단계 테스트 실행</sp-button></div>
+    <div class="row"><sp-button id="btnEnv" variant="secondary" quiet>환경 확인 (Mac·Photoshop·엔진)</sp-button></div>
+    <div id="env" class="note">아직 확인하지 않음</div>
   </div>
 
   <div class="box">
-    <h3>2단계 · 자동 클린업 (Python 로컬 서버 필요, 1단계 확인 후 사용)</h3>
-    <div class="row">
-      <sp-radio-group id="type">
-        <sp-radio value="apparel" checked>어패럴</sp-radio>
-        <sp-radio value="interior">인테리어</sp-radio>
-      </sp-radio-group>
-    </div>
+    <h3>모드</h3>
+    <sp-radio-group id="type">
+      <sp-radio value="apparel" checked>어패럴</sp-radio>
+      <sp-radio value="interior">인테리어</sp-radio>
+    </sp-radio-group>
     <div class="row">
       <sp-radio-group id="repeat">
         <sp-radio value="none" checked>리핏 없음</sp-radio>
@@ -40,17 +35,41 @@
         <sp-radio value="both">상하좌우</sp-radio>
       </sp-radio-group>
     </div>
-    <div class="row"><sp-checkbox id="removePaper">인테리어: 스캔 종이 배경 지우기</sp-checkbox></div>
-    <div class="row"><sp-checkbox id="fixRepeats">어패럴: 반복된 1픽셀도 고치기</sp-checkbox></div>
-    <div class="row">
-      <sp-button id="btnHealth" variant="secondary">서버 확인</sp-button>
-      <sp-button id="btnRun" variant="secondary">자동 클린업 실행</sp-button>
+    <div class="row" id="apparelOpts">
+      <sp-checkbox id="fixRepeats">반복된 1픽셀도 실수로 보고 고치기</sp-checkbox>
     </div>
+    <div class="row" id="interiorOpts" style="display:none">
+      <sp-radio-group id="style">
+        <sp-radio value="watercolor" checked>수채화</sp-radio>
+        <sp-radio value="pencil">색연필</sp-radio>
+        <sp-radio value="crayon">크레파스</sp-radio>
+        <sp-radio value="digital">디지털 색면</sp-radio>
+      </sp-radio-group>
+      <sp-checkbox id="removePaper">스캔 종이 배경 지우기</sp-checkbox>
+    </div>
+  </div>
+
+  <div class="box">
+    <h3>작업</h3>
+    <div class="row">
+      <sp-button id="btnAnalyze" variant="secondary">① 현재 PSD 분석</sp-button>
+      <sp-button id="btnClean" variant="cta">② 자동 클린업</sp-button>
+    </div>
+    <div class="row">
+      <sp-button id="btnCompare" variant="secondary" disabled>③ 전후 비교</sp-button>
+      <sp-button id="btnRecheck" variant="secondary" disabled>④ 남은 오류 재검사</sp-button>
+    </div>
+    <div class="row">
+      <sp-button id="btnSave" variant="cta" disabled>⑤ 새 PSD로 저장</sp-button>
+      <sp-button id="btnReport" variant="secondary" disabled>⑥ 검수 보고서 저장</sp-button>
+    </div>
+    <div class="note">원본 PSD는 바뀌지 않습니다. 클린업은 복제본에 적용되고, 저장하면 '원본이름_CLEAN.psd'가 생깁니다.</div>
   </div>
 
   <sp-progressbar id="prog" max="100" value="0" style="width:100%"></sp-progressbar>
   <div id="msg" class="note"></div>
   <textarea id="out" readonly></textarea>
+  <div class="row"><sp-button id="btnPhase1" variant="secondary" quiet>연동 진단 (1단계 테스트)</sp-button></div>
   <script src="index.js"></script>
 </body>
 </html>
